@@ -3,13 +3,23 @@
 """
 0-1. 메타데이터 추출 — 질문 한 줄에서 조건을 뽑는다
 
-    질문  ->  {people, since, until, keywords}  ->  filter_metadata.py
+    질문  ->  {sender, receiver, participants, since, until, keywords}
+                                  |
+                          filter_metadata.py
 
-뽑는 것은 네 가지뿐이다:
+뽑는 것:
 
-    people      대화 참여자로 지목된 닉네임 (방향은 안 따진다)
-    since/until 기간
-    keywords    원문에 글자 그대로 나올 문자열 (IP·도메인·파일명·지갑주소)
+    sender       말한 사람으로 지목된 닉네임
+    receiver     받는 사람으로 지목된 닉네임
+    participants 방향 없이 대화에 낀 닉네임
+    since/until  기간
+    keywords     원문에 글자 그대로 나올 문자열 (IP·도메인·파일명·지갑주소)
+
+    사람 칸을 셋으로 나눈 것은 질문이 그렇게 말하기 때문이다. 정작 필터는
+    셋을 합쳐 "이 사람들이 다 낀 대화" 로만 건다 — 청크 메타데이터에 방향이
+    없기 때문이다 (chunk_meta.py 참고). sender 하나면 그 사람이 낀 대화,
+    sender + receiver 나 participants 두 명이면 그 둘의 대화쌍이 된다.
+    나눠 두는 값어치는 화면에서 4B 가 무엇을 어떻게 읽었는지 보이는 것이다.
 
 뽑는 일은 4B(Qwen3)가 한다:
 
@@ -28,8 +38,9 @@
 
 사람과 키워드를 가르는 기준 (여기서 제일 자주 틀린다):
 
-    "ahtyng와 alarm 사이의 대화에서..."   -> people   두 사람이 나눈 대화
-    "maze가 등장하는 기록에서..."          -> keywords 본문에 그 글자가 나온다
+    "ahtyng와 alarm 사이의 대화에서..."   -> participants  두 사람이 나눈 대화
+    "stern이 말한 ..."                    -> sender        stern 이 화자
+    "maze가 등장하는 기록에서..."          -> keywords      본문에 그 글자가 나온다
 
     'maze' 는 닉네임이 아니라 랜섬웨어 이름이다. 반대로 'target' 은 닉네임
     이기도 하다. 그래서 규칙 쪽은 '사이의 대화 / 가 보낸 / 와의 대화' 처럼
@@ -75,7 +86,9 @@ DEFAULT_MODE = os.getenv("RAG_EXTRACT", "llm").strip().lower()
 MAX_NEW_TOKENS = 256
 
 RESPONSE_SCHEMA = {
-    "people": ["대화 참여자로 지목된 닉네임. 없으면 []"],
+    "sender": ["말한 사람으로 지목된 닉네임. 없으면 []"],
+    "receiver": ["받는 사람으로 지목된 닉네임. 없으면 []"],
+    "participants": ["방향 없이 대화에 낀 닉네임. 없으면 []"],
     "since": "시작 날짜 YYYY-MM-DD. 없으면 null",
     "until": "끝 날짜 YYYY-MM-DD. 없으면 null",
     "keywords": ["원문에 그대로 나올 ASCII 문자열. 없으면 []"],
@@ -90,6 +103,13 @@ RESPONSE_SCHEMA = {
 DYAD_RE = re.compile(r"([A-Za-z0-9_.\-]{2,})\s*(?:와|과)\s*"
                      r"([A-Za-z0-9_.\-]{2,})\s*(?:의|가|이)?\s*"
                      r"(?:사이[의에]?\s*)?(?:대화|나눈|주고받)")
+# "A가 B에게 보낸" — 방향이 다 드러난 경우
+DIRECTED_RE = re.compile(r"([A-Za-z0-9_.\-]{2,})\s*[가이]\s*"
+                         r"([A-Za-z0-9_.\-]{2,})\s*(?:에게|한테)\s*"
+                         r"(?:보낸|말한|준|전한|시킨)")
+# "A에게 보낸", "A한테 온" — 받는 사람만 드러난 경우
+RECEIVER_RE = re.compile(r"([A-Za-z0-9_.\-]{2,})\s*(?:에게|한테)\s*"
+                         r"(?:보낸|말한|온|전한)")
 # "A가 보낸", "A와의 대화", "A의 대화", "A가 말한"
 SOLO_RE = re.compile(r"([A-Za-z0-9_.\-]{2,})\s*"
                      r"(?:와의\s*대화|의\s*대화|[가이]\s*보낸|[가이]\s*말한)")
@@ -149,14 +169,30 @@ def rule_extract(question: str) -> dict:
     """정규식으로 뽑는다. 모델 없이 도는 기준선이자 안전망."""
     q = question or ""
 
-    people: list[str] = []
-    m = DYAD_RE.search(q)
-    if m:
-        people = [m.group(1), m.group(2)]
+    # 방향이 드러난 표현부터 본다. 필터에서는 어차피 "그 사람이 낀 대화" 로
+    # 같아지지만, 화면에는 질문이 말한 대로 칸을 나눠 보여 준다.
+    sender: list[str] = []
+    receiver: list[str] = []
+    participants: list[str] = []
+
+    m = DIRECTED_RE.search(q)
+    if m:                                     # A 가 B 에게 보낸
+        sender, receiver = [m.group(1)], [m.group(2)]
+    elif DYAD_RE.search(q):                   # A 와 B 의 대화
+        m = DYAD_RE.search(q)
+        participants = [m.group(1), m.group(2)]
     else:
         m = SOLO_RE.search(q)
-        if m:
-            people = [m.group(1)]
+        if m and re.search(r"[가이]\s*(?:말한|보낸)", m.group(0)):
+            sender = [m.group(1)]             # A 가 말한
+        elif m:
+            participants = [m.group(1)]       # A 와의 대화
+        else:
+            m = RECEIVER_RE.search(q)
+            if m:
+                receiver = [m.group(1)]       # A 에게 보낸
+
+    people = [*sender, *receiver, *participants]
 
     since_list, until_list = _dates_of(q)
 
@@ -169,7 +205,9 @@ def rule_extract(question: str) -> dict:
                 and not t.isdigit() and not DATE_TOKEN_RE.fullmatch(t)]
 
     return {
-        "people": people,
+        "sender": sender,
+        "receiver": receiver,
+        "participants": participants,
         "since": min(since_list) if since_list else None,
         "until": max(until_list) if until_list else None,
         "keywords": list(dict.fromkeys(keywords)),
@@ -197,9 +235,18 @@ def build_system_prompt(nicks: list[str], max_nicks: int = 320) -> str:
 
 뽑을 것:
 
-  people   대화 참여자로 지목된 닉네임. 아래 명부에 있는 것만.
-           "A와 B 사이의 대화", "A가 보낸", "A와의 대화" 처럼 관계를 말할 때만
-           넣습니다. 방향(보낸 사람/받는 사람)은 구분하지 않습니다.
+  sender       보낸 사람 / 말한 사람.
+               "A가 보낸", "A가 말한", "A가 지시한" -> sender: ["A"]
+  receiver     받는 사람.
+               "A에게 보낸", "A가 받은", "A한테 온" -> receiver: ["A"]
+  participants 방향을 안 밝힌 대화. 낀 사람을 **모두** 넣습니다.
+               "A와 B의 대화", "A와 B 사이의 대화", "A와 B가 나눈 이야기"
+               -> participants: ["A", "B"]      (한 명만 넣으면 틀립니다)
+
+           셋 다 아래 명부에 있는 닉네임만 넣습니다. 한 사람을 두 칸에
+           중복해서 넣지 마세요 — 어느 칸에 넣든 그 사람이 대화에 낀 것으로
+           찾습니다.
+
   since    기간 시작 (YYYY-MM-DD). 없으면 null
   until    기간 끝 (YYYY-MM-DD). 하루만 말하면 since 와 같게. 없으면 null
   keywords 대화 본문에 글자 그대로 나올 문자열. IP 주소, 도메인, 파일명,
@@ -207,9 +254,9 @@ def build_system_prompt(nicks: list[str], max_nicks: int = 320) -> str:
 
 지켜야 할 것:
 
-  1. "X가 등장하는 기록에서" 의 X 는 people 이 아니라 keywords 입니다.
+  1. "X가 등장하는 기록에서" 의 X 는 사람 칸이 아니라 keywords 입니다.
      본문에 그 글자가 나온다는 뜻이지 그 사람이 대화했다는 뜻이 아닙니다.
-  2. 명부에 없는 이름은 people 에 넣지 마세요. 대신 keywords 로 넣으세요.
+  2. 명부에 없는 이름은 사람 칸에 넣지 마세요. 대신 keywords 로 넣으세요.
   3. 한국어 낱말은 keywords 에 넣지 마세요. 원문이 러시아어·영어라 그대로
      나오지 않습니다. ASCII 문자열만 넣습니다.
   4. 질문에 없는 조건은 지어내지 마세요. 없으면 [] 와 null 입니다.
@@ -217,13 +264,19 @@ def build_system_prompt(nicks: list[str], max_nicks: int = 320) -> str:
 보기:
 
   질문: ahtyng와 alarm 사이의 대화에서 서버 현황을 파악한 증거를 찾아주세요.
-  출력: {{"people": ["ahtyng", "alarm"], "since": null, "until": null, "keywords": []}}
+  출력: {{"sender": [], "receiver": [], "participants": ["ahtyng", "alarm"], "since": null, "until": null, "keywords": []}}
 
-  질문: 68.224.217.72와 CALAHANLAW가 등장하는 기록에서 내부 문서를 탈취한 정황을 찾아주세요.
-  출력: {{"people": [], "since": null, "until": null, "keywords": ["68.224.217.72", "CALAHANLAW"]}}
+  질문: stern이 말한 locker에 대한 증거를 찾아주세요.
+  출력: {{"sender": ["stern"], "receiver": [], "participants": [], "since": null, "until": null, "keywords": ["locker"]}}
+
+  질문: bentley가 deploy에게 보낸 ransom 관련 지시를 찾아주세요.
+  출력: {{"sender": ["bentley"], "receiver": ["deploy"], "participants": [], "since": null, "until": null, "keywords": ["ransom"]}}
+
+  질문: 68.224.217.72가 등장하는 기록에서 내부 문서를 탈취한 정황을 찾아주세요.
+  출력: {{"sender": [], "receiver": [], "participants": [], "since": null, "until": null, "keywords": ["68.224.217.72"]}}
 
   질문: 2020-09-29에 랜섬웨어 배포를 논의한 대화를 찾아주세요.
-  출력: {{"people": [], "since": "2020-09-29", "until": "2020-09-29", "keywords": []}}
+  출력: {{"sender": [], "receiver": [], "participants": [], "since": "2020-09-29", "until": "2020-09-29", "keywords": []}}
 
 닉네임 명부 ({len(nicks)}명):
 {roster}"""
@@ -291,11 +344,19 @@ def _merge(rule: dict, llm: dict | None, meta) -> tuple[dict, bool]:
     out: dict = {}
     used_rule = False
 
-    people = [p for p in (meta.resolve(x) for x in _listify(llm.get("people")))
-              if p]
-    if not people and rule.get("people"):
-        people, used_rule = rule["people"], True
-    out["people"] = list(dict.fromkeys(people))
+    # 사람은 칸별로 옮긴다. 어느 칸이든 명부에 있는 이름만 남는다.
+    got_any = False
+    for key in ("sender", "receiver", "participants"):
+        names = [p for p in (meta.resolve(x) for x in _listify(llm.get(key)))
+                 if p]
+        out[key] = list(dict.fromkeys(names))
+        got_any = got_any or bool(names)
+
+    # 4B 가 사람을 한 명도 못 뽑았는데 규칙에는 잡혔으면 규칙 쪽을 쓴다.
+    if not got_any:
+        for key in ("sender", "receiver", "participants"):
+            if rule.get(key):
+                out[key], used_rule = list(rule[key]), True
 
     for key in ("since", "until"):
         value = llm.get(key)

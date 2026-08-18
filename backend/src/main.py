@@ -59,7 +59,7 @@ from answer import AnswerResult  # noqa: E402
 from corpus import doc_label  # noqa: E402
 from extract_metadata import ExtractResult, extract  # noqa: E402
 from filter_metadata import FilterResult, build_mask  # noqa: E402
-from grade import GradeResult, grade_answer  # noqa: E402
+from grade import GradeResult, grade_answer, grade_chunks  # noqa: E402
 from rerank import FINAL_TOP_N, RerankResult  # noqa: E402
 from search import (  # noqa: E402
     DEFAULT_TOP_K,
@@ -129,6 +129,7 @@ def run_pipeline(question: str, doc: str | None = None,
                  top_k: int = DEFAULT_TOP_K,
                  final_n: int = FINAL_TOP_N,
                  gold: list[str] | None = None,
+                 gold_chunks: list[int] | None = None,
                  answer_language: str | None = None,
                  on_stage=None,
                  meta_mode: str | None = None) -> PipelineResult:
@@ -138,6 +139,10 @@ def run_pipeline(question: str, doc: str | None = None,
     doc 은 근거를 찾을 문서다. 문서 키나 짧은 코드를 주면 그 문서 안에서만 찾고,
     주지 않으면 7개 문서를 한 색인으로 합쳐 뒤진다. 질문은 한국어, 근거는 7개
     언어, 답변은 한국어다 (answer_language 로 바꿀 수 있다).
+
+    gold_chunks 를 주면 5단계를 청크로 채점한다 — 최종 선정 청크에 정답 청크가
+    하나라도 들어 있으면 정답이다. 지금 정답표가 모범 답안 대신 청크 번호를
+    들고 있어서 이쪽이 기본 경로다.
 
     gold 를 주면 5단계(정답 비교)까지 돈다. data/qa.json 에 적어 둔 정답 후보
     목록이며, 화면에서 질문 번호로 찾아 넘긴다. 비어 있으면 건너뛴다.
@@ -191,8 +196,12 @@ def run_pipeline(question: str, doc: str | None = None,
 
     # --- 5 단계 : 정답 비교 -------------------------------------------------
     gr = None
-    if gold:
-        gr = grade_answer(clean, ans.answer if (ans and ans.ok) else "", gold)
+    answer_text = ans.answer if (ans and ans.ok) else ""
+    if gold_chunks:
+        gr = grade_chunks(clean, rr.selected, gold_chunks, answer_text)
+        emit("grade", gr)
+    elif gold:
+        gr = grade_answer(clean, answer_text, gold)
         emit("grade", gr)
 
     return PipelineResult(
@@ -239,6 +248,8 @@ def main() -> None:
                         choices=("llm", "rule", "off"),
                         help="0단계(조건 추출) 방식\n"
                              "기본은 llm. rule 은 규칙만 써서 모델을 안 올린다")
+    parser.add_argument("--gold-chunks", default=None, nargs="*", type=int,
+                        help="정답 청크 번호. 최종 청크에 하나라도 들면 정답")
     parser.add_argument("--gold", default=None, nargs="*",
                         help="정답 후보. 주면 5단계(정답 비교)까지 돈다\n"
                              "질문 번호로 채점하려면 src/grade.py --run N 을 쓴다")
@@ -247,6 +258,7 @@ def main() -> None:
     question = " ".join(args.question) or "대마재배자는 누구에게 허가를 받나요?"
     result = run_pipeline(question, doc=args.doc, top_k=args.top_k,
                           final_n=args.final_n, gold=args.gold,
+                          gold_chunks=args.gold_chunks,
                           answer_language=args.answer_lang,
                           meta_mode=args.meta)
 

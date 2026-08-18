@@ -67,7 +67,10 @@ class Question:
     doc: str                                              # 정답이 든 문서 키
     question: str
     answer: str = ""                                      # 사람이 쓴 모범 답안
-    keywords: list[str] = field(default_factory=list)     # 판정에 쓰는 후보
+    keywords: list[str] = field(default_factory=list)     # 문자열 판정용 후보
+    # 정답 청크 번호. qa.json 의 answer_chunk_indices 다. 같은 근거가
+    # 512/128 overlap 으로 여러 청크에 걸쳐 있어 목록으로 온다.
+    answer_chunks: list[int] = field(default_factory=list)
 
     @property
     def label(self) -> str:
@@ -86,6 +89,7 @@ class GradeResult:
     verdict: str = ""            # "정답" | "오답" | "판정 불가"
     reason: str = ""
     gold_answer: str = ""        # 사람이 쓴 모범 답안 (화면에 같이 보여준다)
+    method: str = "문자열 포함"   # 무엇으로 판정했는지 (화면 표시용)
     elapsed: float = 0.0
     error: str | None = None
 
@@ -146,6 +150,9 @@ def load_questions() -> tuple[Question, ...]:
             question=str(row["question"]).strip(),
             answer=str(row.get("answer") or "").strip(),
             keywords=[str(w).strip() for w in words if str(w).strip()],
+            answer_chunks=[int(c) for c in
+                           (row.get("answer_chunk_indices") or [])
+                           if str(c).lstrip("-").isdigit()],
         ))
     return tuple(items)
 
@@ -207,6 +214,59 @@ def normalize(text: str) -> str:
     """
     text = unicodedata.normalize("NFKC", text or "").lower()
     return re.sub(r"[\s\W_]+", "", text, flags=re.UNICODE)
+
+
+def grade_chunks(question: str, selected, gold_chunks,
+                 llm_answer: str = "") -> GradeResult:
+    """
+    최종 선정된 청크에 정답 청크가 하나라도 들었으면 정답으로 본다.
+
+    답변 문장을 대조하지 않는 이유:
+
+        지금 정답표(data/qa/qa.json)가 들고 있는 것은 모범 답안이 아니라
+        answer_chunk_indices 다. 근거를 제대로 찾아왔는지를 재는 세트이지
+        문장을 얼마나 잘 옮겨 적었는지를 재는 세트가 아니다. 검색·리랭킹까지가
+        이 파이프라인에서 고칠 수 있는 부분이기도 하다.
+
+    하나만 들어도 정답으로 치는 이유:
+
+        같은 근거가 512/128 overlap 으로 여러 청크에 겹쳐 들어가 있어서
+        정답 청크가 2~5개씩이다. 그중 하나만 근거로 들어가도 답은 나온다.
+
+    청크 번호는 언어와 무관하다. ru#93 과 en#93 은 같은 대화의 두 판본이라
+    둘 중 무엇이 뽑혀도 93 으로 센다.
+    """
+    started = time.time()
+    gold = [int(c) for c in (gold_chunks or [])]
+    picked = []
+    for hit in selected or []:
+        index = getattr(hit, "chunk_index", hit)
+        picked.append(int(index))
+
+    hit_chunks = [c for c in gold if c in picked]
+    result = GradeResult(
+        question=question,
+        llm_answer=llm_answer or "",
+        candidates=[f"#{c}" for c in gold],
+        matched=[f"#{c}" for c in hit_chunks],
+        gold_answer="",
+        method="최종 청크 포함",
+    )
+
+    if not gold:
+        result.verdict = "판정 불가"
+        result.reason = "이 질문에는 정답 청크가 적혀 있지 않습니다."
+    elif hit_chunks:
+        result.verdict = "정답"
+        result.reason = (f"최종 청크에 정답 청크 "
+                         f"{', '.join(f'#{c}' for c in hit_chunks)} 가 있습니다.")
+    else:
+        result.verdict = "오답"
+        result.reason = (f"최종 청크 {', '.join(f'#{c}' for c in sorted(set(picked)))} "
+                         f"에 정답 청크가 없습니다.")
+
+    result.elapsed = time.time() - started
+    return result
 
 
 def grade_answer(question: str, llm_answer: str,

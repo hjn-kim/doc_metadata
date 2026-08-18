@@ -60,13 +60,19 @@ def _fo(value) -> float | None:
 
 def query_to_dict(q: MetaQuery) -> dict:
     """추출기가 뽑고 명부 대조를 마친 조건. 0단계 두 결과가 함께 쓴다."""
-    return {"people": list(q.people), "unknown": list(q.unknown),
+    return {"people": list(q.people),
+            "sender": list(q.sender), "receiver": list(q.receiver),
+            "participants": list(q.participants),
+            "unknown": list(q.unknown),
             "since": q.since, "until": q.until, "keywords": list(q.keywords)}
 
 
 def query_from_dict(d: dict | None) -> MetaQuery:
     d = d or {}
     return MetaQuery(people=list(d.get("people", [])),
+                     sender=list(d.get("sender", [])),
+                     receiver=list(d.get("receiver", [])),
+                     participants=list(d.get("participants", [])),
                      unknown=list(d.get("unknown", [])),
                      since=d.get("since"), until=d.get("until"),
                      keywords=list(d.get("keywords", [])))
@@ -343,6 +349,7 @@ def grade_to_dict(g: GradeResult | None) -> dict | None:
         "verdict": g.verdict,
         "reason": g.reason,
         "gold_answer": g.gold_answer,
+        "method": g.method,
         "elapsed": _f(g.elapsed),
         "error": g.error,
     }
@@ -359,6 +366,7 @@ def grade_from_dict(d: dict | None) -> GradeResult | None:
         verdict=d["verdict"],
         reason=d["reason"],
         gold_answer=d["gold_answer"],
+        method=d.get("method", "문자열 포함"),
         elapsed=_f(d["elapsed"]),
         error=d["error"],
     )
@@ -477,7 +485,8 @@ def _dummy() -> PipelineResult:
     ans = AnswerResult(question="질문", answer="답입니다.", enough=True,
                        citations=["ko#12"], note="", model="Qwen/Qwen3-4B",
                        elapsed=40.0)
-    q = MetaQuery(people=["stern", "tom"], unknown=["없는닉"],
+    q = MetaQuery(people=["stern", "tom"], sender=["stern"],
+                  receiver=["tom"], participants=[], unknown=["없는닉"],
                   since="2020-09-29", until="2020-09-29",
                   keywords=["68.224.217.72"])
     ex = ExtractResult(question="질문", query=q,
@@ -517,6 +526,12 @@ def main() -> None:
         ("추출 조건", before.extract.label(), after.extract.label()),
         ("추출 키워드", before.extract.query.keywords,
          after.extract.query.keywords),
+        ("추출 sender", before.extract.query.sender,
+         after.extract.query.sender),
+        ("추출 receiver", before.extract.query.receiver,
+         after.extract.query.receiver),
+        ("추출 participants", before.extract.query.participants,
+         after.extract.query.participants),
         ("모르는 이름", before.extract.query.unknown,
          after.extract.query.unknown),
         ("필터 요약", before.filter.summary(), after.filter.summary()),

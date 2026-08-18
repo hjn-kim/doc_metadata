@@ -148,6 +148,8 @@ class SearchRequest(BaseModel):
     top_k: int = Field(DEFAULT_TOP_K, ge=1, le=50)
     final_n: int = Field(FINAL_TOP_N, ge=1, le=20)
     gold: list[str] | None = Field(None, description="정답 후보. 주면 5단계까지")
+    gold_chunks: list[int] | None = Field(
+        None, description="정답 청크 번호. 최종 청크에 하나라도 들면 정답")
     answer_language: str | None = Field(None, description="답변 언어 (기본 한국어)")
     meta: str | None = Field(None, pattern="^(llm|rule|off)$",
                              description="0단계 조건 추출 방식. "
@@ -169,6 +171,7 @@ def _run(req: SearchRequest, on_stage=None):
             top_k=req.top_k,
             final_n=req.final_n,
             gold=req.gold or None,
+            gold_chunks=req.gold_chunks or None,
             answer_language=req.answer_language,
             on_stage=on_stage,
             meta_mode=req.meta,
@@ -316,7 +319,8 @@ def rag_meta(x_api_key: str | None = Header(None)):
         "documents": _doc_rows(),
         "questions": [
             {"id": q.id, "doc": q.doc, "question": q.question,
-             "answer": q.answer, "keywords": list(q.keywords)}
+             "answer": q.answer, "keywords": list(q.keywords),
+             "answer_chunks": list(q.answer_chunks)}
             for q in load_questions()
         ],
     }

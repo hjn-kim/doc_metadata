@@ -3,7 +3,8 @@
 """
 0-2. 메타데이터 필터 — 추출된 조건을 행 마스크로
 
-    extract_metadata.py (4B LLM)  ->  {people, since, until, keywords}
+    extract_metadata.py (4B LLM)
+        {sender, receiver, participants, since, until, keywords}
                                           |
                                       여기서 정규화 + 마스크
                                           |
@@ -14,12 +15,18 @@
     1. 정규화   추출기가 뭐라고 적어 보내든 사람 목록과 기간 두 개로 접는다.
     2. 사다리   그 조건으로 후보가 0개가 되면 한 겹씩 풀어 준다.
 
-왜 sender/receiver 를 접나:
+왜 sender/receiver/participants 를 한 목록으로 접나:
 
     청크 메타데이터에는 방향이 없다 (chunk_meta.py 참고). 4B 에게는
-    "sender: tom" 이 자연스러운 출력이라 뽑아 오게 두되, 여기서 사람 목록으로
-    합친다. 어차피 찾는 것은 tom 이 낀 대화다. dyad·participants·화자 같은
-    다른 이름표로 와도 같은 자리에 들어간다.
+    "sender: tom" 이 자연스러운 출력이라 칸을 나눠 받되, 필터에서는 셋을
+    합쳐 "이 사람들이 다 대화쌍 안에 있어야 한다" 로 건다.
+
+        sender: [tom]                     -> tom 이 낀 대화
+        sender: [tom], receiver: [stern]  -> tom~stern 대화쌍
+        participants: [tom, stern]        -> 같은 것
+
+    칸별 목록은 MetaQuery 에 그대로 남겨 화면이 4B 의 판단을 보여 줄 수 있게
+    한다. 판정에 쓰는 것은 합친 people 하나다.
 
 왜 사다리가 필요한가 (이 파일에서 제일 중요한 부분):
 
@@ -68,10 +75,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from chunk_meta import ChunkMeta, from_epoch, load_chunk_meta  # noqa: E402
 
-# 추출기가 사람을 적어 보낼 수 있는 이름들. 전부 한 자리로 모은다.
-PEOPLE_KEYS = ("people", "persons", "names", "who", "participants",
-               "sender", "senders", "receiver", "receivers", "dyad",
-               "speaker", "speakers", "from_", "nick", "nicks")
+# 추출기가 사람을 적어 보낼 수 있는 이름들. 역할별로 받되, 필터에서는 셋을
+# 합쳐 쓴다 — 청크 메타데이터에 방향이 없기 때문이다 (chunk_meta.py 참고).
+SENDER_KEYS = ("sender", "senders", "from_", "speaker", "speakers")
+RECEIVER_KEYS = ("receiver", "receivers", "recipient", "recipients", "to_")
+PARTICIPANT_KEYS = ("participants", "participant", "people", "persons",
+                    "names", "who", "dyad", "nick", "nicks")
 
 # 기간의 시작/끝. 추출기가 흔들리는 자리라 넉넉히 받는다.
 SINCE_KEYS = ("since", "timefrom", "time_from", "date_from", "start",
@@ -141,7 +150,14 @@ def parse_span(value: str | None, end: bool = False) -> str | None:
 class MetaQuery:
     """추출 결과를 필터가 쓸 형태로 접은 것."""
 
+    # 필터가 실제로 쓰는 것. 아래 세 칸을 합친 것이다 (중복 제거).
     people: list[str] = field(default_factory=list)    # 명부에 있는 실제 닉
+    # 추출기가 어느 칸에 적어 보냈는지. 화면 표시와 검수용이다.
+    # 방향은 청크 메타데이터에 없으므로 필터에서는 셋 다 같은 뜻이 된다:
+    # "그 사람이 대화쌍 안에 있어야 한다".
+    sender: list[str] = field(default_factory=list)
+    receiver: list[str] = field(default_factory=list)
+    participants: list[str] = field(default_factory=list)
     unknown: list[str] = field(default_factory=list)   # 명부에 없어 버린 이름
     since: str | None = None
     until: str | None = None
@@ -173,17 +189,32 @@ def normalize(raw: dict, meta: ChunkMeta | None = None) -> MetaQuery:
     meta = meta or load_chunk_meta()
     raw = raw or {}
 
-    wanted: list[str] = []
-    for key in PEOPLE_KEYS:
-        wanted.extend(_as_list(raw.get(key)))
+    def resolved(keys) -> tuple[list[str], list[str]]:
+        """이름 목록 -> (명부에 있는 것, 없어서 버린 것)."""
+        good, bad = [], []
+        wanted: list[str] = []
+        for key in keys:
+            wanted.extend(_as_list(raw.get(key)))
+        for name in dict.fromkeys(wanted):        # 중복 제거, 순서 유지
+            real = meta.resolve(name)
+            if real is None:
+                bad.append(name)
+            elif real not in good:
+                good.append(real)
+        return good, bad
 
-    people, unknown = [], []
-    for name in dict.fromkeys(wanted):            # 중복 제거, 순서 유지
-        real = meta.resolve(name)
-        if real is None:
-            unknown.append(name)
-        elif real not in people:
-            people.append(real)
+    sender, bad_s = resolved(SENDER_KEYS)
+    receiver, bad_r = resolved(RECEIVER_KEYS)
+    participants, bad_p = resolved(PARTICIPANT_KEYS)
+
+    # 필터는 방향을 모른다. 셋을 합쳐 "이 사람들이 다 낀 대화" 로 건다.
+    # sender 하나면 그 사람이 낀 대화, sender + receiver 면 그 둘의 대화쌍,
+    # participants 두 명이면 마찬가지로 그 둘의 대화쌍이다.
+    people: list[str] = []
+    for name in (*sender, *receiver, *participants):
+        if name not in people:
+            people.append(name)
+    unknown = list(dict.fromkeys([*bad_s, *bad_r, *bad_p]))
 
     date = _first(raw, DATE_KEYS)
     since = parse_span(_first(raw, SINCE_KEYS) or date, end=False)
@@ -193,7 +224,9 @@ def normalize(raw: dict, meta: ChunkMeta | None = None) -> MetaQuery:
     for key in KEYWORD_KEYS:
         keywords.extend(_as_list(raw.get(key)))
 
-    return MetaQuery(people=people, unknown=unknown, since=since, until=until,
+    return MetaQuery(people=people, sender=sender, receiver=receiver,
+                     participants=participants, unknown=unknown,
+                     since=since, until=until,
                      keywords=list(dict.fromkeys(keywords)))
 
 
