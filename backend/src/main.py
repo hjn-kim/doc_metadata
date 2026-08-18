@@ -10,7 +10,9 @@
       |
       +-- 0-1  extract_metadata.py  조건 추출 (4B)   -> ExtractResult
       |
-      +-- 0-2  filter_metadata.py   후보 좁히기      -> FilterResult
+      +-- 0-2  filter_metadata.py   메타 후보        -> FilterResult
+      |
+      +-- 0-3  search.narrow()       키워드 후보·교집합 -> Narrowing
       |
       +-- 1    search.py      검색 랭킹              -> SearchResult
       |
@@ -22,11 +24,16 @@
       |
     PipelineResult
 
-0단계는 검색 범위를 좁히는 일이다. 질문에서 사람·기간·키워드를 뽑아
-(extract) 그 조건에 맞는 청크만 남긴 뒤(filter) 그 안에서 검색한다. 조건이
-하나도 안 잡히면 예전처럼 전체를 뒤진다 — 0단계는 검색을 돕는 장치이지
+0단계는 검색 범위를 좁히는 일이고, 채널이 둘이다.
+
+    질문 -> 4B -> 사람·기간          -> 메타 채널   (chunk_meta.npz 를 본다)
+                 키워드              -> 키워드 채널 (본문 글자를 본다)
+                                        |
+                                     교집합 = 검색 후보
+
+조건이 하나도 안 잡히면 예전처럼 전체를 뒤진다. 0단계는 검색을 돕는 장치이지
 막는 장치가 아니라서, 어느 단계에서 틀리든 최악이 '안 좁힌 검색' 이 되도록
-사다리를 달아 두었다 (filter_metadata.py 참고).
+사다리를 달아 두었다 (filter_metadata.py, search.narrow 참고).
 
 단계마다 실패해도 파이프라인이 멈추지 않는다. 각 결과 객체가 error 를 들고
 있으므로 화면에서 어디가 어떻게 실패했는지 보여주면서 나머지는 계속 굴린다.
@@ -54,7 +61,14 @@ from extract_metadata import ExtractResult, extract  # noqa: E402
 from filter_metadata import FilterResult, build_mask  # noqa: E402
 from grade import GradeResult, grade_answer  # noqa: E402
 from rerank import FINAL_TOP_N, RerankResult  # noqa: E402
-from search import DEFAULT_TOP_K, SearchResult, search  # noqa: E402
+from search import (  # noqa: E402
+    DEFAULT_TOP_K,
+    Narrowing,
+    SearchResult,
+    load_index,
+    narrow,
+    search,
+)
 
 
 @dataclass
@@ -68,6 +82,7 @@ class PipelineResult:
 
     extract: ExtractResult | None = None      # 0-1 단계
     filter: FilterResult | None = None       # 0-2 단계
+    narrow: Narrowing | None = None          # 0-3 단계 (두 채널의 교집합)
     search: SearchResult | None = None       # 1 단계
     rerank: RerankResult | None = None       # 2, 3 단계
     answer: AnswerResult | None = None       # 4 단계
@@ -128,8 +143,9 @@ def run_pipeline(question: str, doc: str | None = None,
     목록이며, 화면에서 질문 번호로 찾아 넘긴다. 비어 있으면 건너뛴다.
 
     on_stage(단계이름, 결과) 를 주면 단계가 끝날 때마다 부른다. 단계이름은
-    "extract" / "filter" / "search" / "rerank" / "answer" / "grade" 다. 전체가
-    20초 넘게 걸리는데 다 끝나야 첫 카드가 뜨면 멈춘 것처럼 보이기 때문이다.
+    "extract" / "filter" / "narrow" / "search" / "rerank" / "answer" /
+    "grade" 다. 전체가 20초 넘게 걸리는데 다 끝나야 첫 카드가 뜨면 멈춘 것처럼
+    보이기 때문이다.
 
     meta_mode 는 0단계를 어떻게 돌릴지다. "llm"(기본, 4B + 규칙) / "rule"(규칙만,
     모델을 안 올린다) / "off"(0단계를 건너뛰고 전체를 뒤진다).
@@ -154,9 +170,14 @@ def run_pipeline(question: str, doc: str | None = None,
     fr = build_mask(ex.query)
     emit("filter", fr)
 
+    # 메타 채널과 키워드 채널이 각각 몇 개를 남겼고 교집합이 몇 개인지.
+    # 검색보다 먼저 끝내는 이유는 화면에 이 숫자를 먼저 띄우기 위해서다
+    # (질의 임베딩에 몇 초가 걸린다).
+    nr = narrow(load_index(doc), fr.mask, ex.query.keywords)
+    emit("narrow", nr)
+
     # --- 1 단계 : 검색 랭킹 -------------------------------------------------
-    sr = search(clean, doc=doc, top_k=top_k, mask=fr.mask,
-                keywords=ex.query.keywords)
+    sr = search(clean, doc=doc, top_k=top_k, narrowing=nr)
     emit("search", sr)
 
     # --- 2, 3 단계 : 리랭킹 + 최종 선정 -------------------------------------
@@ -181,6 +202,7 @@ def run_pipeline(question: str, doc: str | None = None,
         doc_name=doc_label(doc),
         extract=ex,
         filter=fr,
+        narrow=nr,
         search=sr,
         rerank=rr,
         answer=ans,
@@ -242,7 +264,16 @@ def main() -> None:
         if ex.query.unknown:
             print(f"    [!] 명부에 없어 버린 이름: {', '.join(ex.query.unknown)}")
         if fr is not None:
-            print(f"    후보  : {fr.summary()}")
+            print(f"    메타  : {fr.summary()}")
+
+    nr = result.narrow
+    if nr is not None:
+        def _n(value):
+            return "-" if value is None else f"{value:,}"
+        print(f"\n[0] 후보 좁히기  청크 {nr.n_chunks:,}개 -> {nr.n_used:,}개 "
+              f"({nr.step})")
+        print(f"    메타 {_n(nr.n_meta)} · 키워드 {_n(nr.n_keyword)} · "
+              f"교집합 {_n(nr.n_both)}")
 
     print(f"\n[1] 검색 랭킹    청크 {sr.n_indexed}개"
           f"{f' 중 후보 {sr.n_candidates:,}개' if sr.filtered else ''}"

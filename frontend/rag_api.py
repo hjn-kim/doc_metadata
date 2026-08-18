@@ -167,6 +167,27 @@ class FilterResult:
 
 
 @dataclass
+class Narrowing:
+    """0-3단계 결과 — 두 채널이 각각 몇 개를 남겼고 교집합이 몇 개인가.
+
+    숫자는 전부 청크 단위다 (색인은 같은 청크의 러시아어·영어 두 판본을 행으로
+    갖고 있어서 행으로 세면 두 배로 보인다).
+    """
+
+    n_chunks: int = 0             # 전체 청크
+    n_meta: int | None = None     # 메타 조건을 통과한 청크 (조건 없으면 None)
+    n_keyword: int | None = None  # 키워드가 든 청크
+    n_both: int | None = None     # 교집합
+    n_used: int = 0               # 실제로 검색에 쓴 후보
+    step: str = ""                # 무엇을 썼는지
+    keywords: list[str] = field(default_factory=list)
+
+    @property
+    def ratio(self) -> float:
+        return self.n_used / self.n_chunks if self.n_chunks else 1.0
+
+
+@dataclass
 class SearchResult:
     """1단계 결과."""
 
@@ -176,7 +197,8 @@ class SearchResult:
     top_k: int
     hits: list[Hit] = field(default_factory=list)
     n_indexed: int = 0
-    n_candidates: int = 0         # 0단계를 통과한 청크 수
+    n_candidates: int = 0         # 0단계를 통과한 색인 행 수
+    n_candidate_chunks: int = 0   # 같은 것을 청크로 센 수
     n_docs: int = 1
     keywords: list[str] = field(default_factory=list)
     narrowed: str = ""            # 어떤 조건으로 좁혔는지
@@ -185,6 +207,13 @@ class SearchResult:
     @property
     def filtered(self) -> bool:
         return 0 < self.n_candidates < self.n_indexed
+
+    @property
+    def pool(self) -> str:
+        """상위 몇 개를 '무엇 중에서' 골랐는지 (색인 행이 아니라 청크로)."""
+        if self.filtered and self.n_candidate_chunks:
+            return f"후보 {self.n_candidate_chunks:,}청크"
+        return f"청크 {self.n_indexed:,}개"
 
 
 @dataclass
@@ -293,6 +322,7 @@ class PipelineResult:
 
     extract: ExtractResult | None = None
     filter: FilterResult | None = None
+    narrow: Narrowing | None = None
     search: SearchResult | None = None
     rerank: RerankResult | None = None
     answer: AnswerResult | None = None
@@ -364,6 +394,17 @@ def _filter(d: dict | None) -> FilterResult | None:
     )
 
 
+def _narrow(d: dict | None) -> Narrowing | None:
+    if d is None:
+        return None
+    return Narrowing(
+        n_chunks=int(d.get("n_chunks", 0)), n_meta=d.get("n_meta"),
+        n_keyword=d.get("n_keyword"), n_both=d.get("n_both"),
+        n_used=int(d.get("n_used", 0)), step=d.get("step", ""),
+        keywords=list(d.get("keywords", [])),
+    )
+
+
 def _search(d: dict | None) -> SearchResult | None:
     if d is None:
         return None
@@ -373,6 +414,7 @@ def _search(d: dict | None) -> SearchResult | None:
         n_indexed=int(d["n_indexed"]),
         # 0단계를 붙이기 전 서버가 보낸 응답에는 없다. 없으면 안 좁힌 것으로 본다.
         n_candidates=int(d.get("n_candidates") or d["n_indexed"]),
+        n_candidate_chunks=int(d.get("n_candidate_chunks", 0)),
         n_docs=int(d["n_docs"]), keywords=list(d.get("keywords", [])),
         narrowed=d.get("narrowed", ""),
         elapsed=float(d["elapsed"]),
@@ -428,6 +470,7 @@ def result_from_dict(d: dict) -> PipelineResult:
         doc=d["doc"], doc_name=d["doc_name"],
         extract=_extract(d.get("extract")),
         filter=_filter(d.get("filter")),
+        narrow=_narrow(d.get("narrow")),
         search=_search(d.get("search")),
         rerank=_rerank(d.get("rerank")),
         answer=_answer(d.get("answer")),
@@ -439,6 +482,7 @@ def result_from_dict(d: dict) -> PipelineResult:
 STAGE_FROM_DICT = {
     "extract": _extract,
     "filter": _filter,
+    "narrow": _narrow,
     "search": _search,
     "rerank": _rerank,
     "answer": _answer,
@@ -610,14 +654,20 @@ def run_pipeline(question: str, doc: str | None = None,
                  final_n: int | None = None,
                  gold: list[str] | None = None,
                  answer_language: str | None = None,
-                 on_stage=None) -> PipelineResult:
+                 on_stage=None,
+                 meta_mode: str | None = None) -> PipelineResult:
     """
     질문 하나를 GPU 서버의 파이프라인에 태운다.
 
     backend/src/main.py 의 run_pipeline 과 계약이 같다. on_stage(단계이름, 결과)
-    는 "search" / "rerank" / "answer" / "grade" 로 그대로 불린다. 전체가 1분을
+    는 "extract" / "filter" / "narrow" / "search" / "rerank" / "answer" /
+    "grade" 로 그대로 불린다. 전체가 1분을
     훌쩍 넘기므로, on_stage 를 주면 단계별 스트리밍(NDJSON)으로 받아 끝난
     단계부터 화면에 그린다.
+
+    meta_mode 는 0단계(조건 추출)를 어떻게 돌릴지다. "llm"(4B) / "rule"(규칙만)
+    / "off"(안 씀). 주지 않으면 GPU 서버 쪽 기본값(RAG_EXTRACT, 보통 llm)을
+    따른다.
 
     실패해도 예외를 던지지 않는다. 답변 단계에 error 를 담아 돌려준다.
     """
@@ -633,6 +683,8 @@ def run_pipeline(question: str, doc: str | None = None,
         payload["top_k"] = top_k
     if final_n:
         payload["final_n"] = final_n
+    if meta_mode:
+        payload["meta"] = meta_mode
 
     try:
         import requests

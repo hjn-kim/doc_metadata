@@ -115,7 +115,8 @@ class SearchResult:
     top_k: int
     hits: list[Hit] = field(default_factory=list)   # 점수 내림차순
     n_indexed: int = 0                              # 색인 전체 청크 수
-    n_candidates: int = 0                           # 필터를 통과한 청크 수
+    n_candidates: int = 0                           # 필터를 통과한 색인 행 수
+    n_candidate_chunks: int = 0                     # 같은 것을 청크로 센 수
     n_docs: int = 1                                 # 뒤진 문서 수
     keywords: list[str] = field(default_factory=list)   # 실제로 건 키워드
     narrowed: str = ""                              # 어떤 조건으로 좁혔는지
@@ -125,6 +126,19 @@ class SearchResult:
     def filtered(self) -> bool:
         """필터가 실제로 범위를 좁혔는가."""
         return 0 < self.n_candidates < self.n_indexed
+
+    @property
+    def pool(self) -> str:
+        """
+        상위 몇 개를 '무엇 중에서' 골랐는지. 화면과 CLI 가 같은 문구를 쓴다.
+
+        색인은 같은 청크의 러시아어·영어 두 판본을 각각 행으로 갖고 있어서 행
+        수로 적으면 두 배로 보인다. 0단계 카드가 청크로 세므로 여기도 청크로
+        맞춘다 (두 카드의 숫자가 다르면 화면에서 이어지지 않는다).
+        """
+        if self.filtered and self.n_candidate_chunks:
+            return f"후보 {self.n_candidate_chunks:,}청크"
+        return f"청크 {self.n_indexed:,}개"
 
 
 # --------------------------------------------------------------------------
@@ -512,9 +526,10 @@ def search(query: str, doc: str | None = None, top_k: int = DEFAULT_TOP_K,
         hits=[make_hit(index, r, float(scores[r])) for r in rows],
         n_indexed=index.size,
         n_candidates=n_candidates,
+        n_candidate_chunks=narrowing.n_used,
         n_docs=index.n_docs,
-        keywords=used,
-        narrowed=note,
+        keywords=list(narrowing.keywords),
+        narrowed=narrowing.step,
         elapsed=time.time() - started,
     )
 
@@ -562,12 +577,22 @@ def main() -> None:
         mask = picked.mask
         print(f"메타 : {picked.summary()}")
 
-    sr = search(question, doc=args.doc, top_k=args.top_k, mask=mask,
-                keywords=keywords)
+    nr = narrow(load_index(args.doc), mask, keywords)
+    print(f"좁힘 : 메타 {nr.n_meta if nr.n_meta is not None else '-'} · "
+          f"키워드 {nr.n_keyword if nr.n_keyword is not None else '-'} · "
+          f"교집합 {nr.n_both if nr.n_both is not None else '-'} "
+          f"-> {nr.n_used:,}개 ({nr.step})")
+
+    sr = search(question, doc=args.doc, top_k=args.top_k, narrowing=nr)
 
     print(f"\n질문 : {sr.query}")
-    if sr.narrowed:
-        print(f"좁힘 : {sr.narrowed}"
-              f"{'  [' + ', '.join(sr.keywords) + ']' if sr.keywords else ''}")
-    print(f"{sr.doc_label} · 청크 {sr.n_indexed}개"
-          f"{f' 중 후보 {sr.n_candidates:,}개' if 
+    if sr.keywords:
+        print(f"키워드: {', '.join(sr.keywords)}")
+    print(f"{sr.doc_label} · {sr.pool} 중 상위 {sr.top_k}개 "
+          f"({sr.elapsed:.1f}초)\n")
+    for rank, hit in enumerate(sr.hits, 1):
+        print(f"  {rank:2d} {hit.score:.4f} {hit.key:<8s} {hit.preview(70)}")
+
+
+if __name__ == "__main__":
+    main()

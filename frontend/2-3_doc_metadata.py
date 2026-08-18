@@ -112,38 +112,70 @@ PIPELINE_STEPS = [
 # 카드 하나를 그리고 끝낸다. 계산은 하지 않는다.
 # ---------------------------------------------------------
 
-def render_meta(ex, fr) -> None:
-    """0. 조건 추출 + 후보 좁히기 — 무엇으로 얼마나 좁혔는지."""
+def render_meta(ex, fr, nr=None) -> None:
+    """
+    0. 조건 추출 + 후보 좁히기 — 두 채널이 각각 몇 개를 남겼고 교집합이 몇 개인가.
+
+    숫자를 채널별로 다 보여 준다. 교집합만 보여 주면 "왜 이만큼 줄었는지" 를
+    화면에서 되짚을 수 없다.
+    """
     if ex is None:
         return
 
     q = ex.query
-    rows = []
-    if q.people:
-        rows.append(("사람", " ~ ".join(q.people) if len(q.people) >= 2
-                     else q.people[0]))
+    cond = []
+    if len(q.people) >= 2:
+        cond.append(("사람", " ~ ".join(q.people)))
+    elif q.people:
+        cond.append(("사람", q.people[0]))
     if q.since or q.until:
-        rows.append(("기간", f"{q.since or '...'} ~ {q.until or '...'}"))
+        cond.append(("기간", f"{q.since or '...'} ~ {q.until or '...'}"))
     if q.keywords:
-        rows.append(("키워드", ", ".join(q.keywords)))
+        cond.append(("키워드", ", ".join(q.keywords)))
     if q.unknown:
-        rows.append(("버린 이름", ", ".join(q.unknown) + " (명부에 없음)"))
-    if not rows:
-        rows.append(("조건", "없음 — 전체 청크를 그대로 뒤집니다"))
+        cond.append(("버린 이름", ", ".join(q.unknown) + " (명부에 없음)"))
+    if not cond:
+        cond.append(("조건", "없음 — 전체 청크를 그대로 뒤집니다"))
 
-    items = "".join(
+    picked = "".join(
         f'<div class="hit-line">'
+        f'<span class="hit-rank">·</span>'
         f'<span class="hit-src">{escape(name)}</span>'
         f'<span class="hit-oneline">{escape(value)}</span>'
         f'</div>'
-        for name, value in rows
+        for name, value in cond
     )
+
+    funnel = ""
+    if nr is not None:
+        def count(value):
+            return "-" if value is None else f"{value:,}"
+
+        rows = [
+            ("메타 해당", count(nr.n_meta), "사람·기간으로 고른 청크"),
+            ("키워드 해당", count(nr.n_keyword),
+             "본문에 그 글자가 있는 청크"),
+            ("교집합", count(nr.n_both if nr.n_both is not None else nr.n_used),
+             f"검색은 이 안에서 합니다 ({escape(nr.step)})"),
+        ]
+        funnel = "".join(
+            f'<div class="hit-line">'
+            f'<span class="hit-score">{value}</span>'
+            f'<span class="hit-src">{escape(name)}</span>'
+            f'<span class="hit-oneline">{note}</span>'
+            f'</div>'
+            for name, value, note in rows
+        )
 
     tags = [f'<span class="tag">{escape(ex.source)}</span>',
             f'<span class="tag">{ex.elapsed:.1f}초</span>']
-    if fr is not None:
+    if nr is not None:
+        tags.insert(0, f'<span class="tag">청크 {nr.n_chunks:,}개 → '
+                       f'{nr.n_used:,}개</span>')
+    elif fr is not None:
         tags.insert(0, f'<span class="tag">청크 {fr.n_total:,}개 → '
                        f'{fr.n_kept:,}개</span>')
+
     relaxed = ""
     if fr is not None and fr.relaxed:
         relaxed = (f'<div class="query-note">조건이 너무 좁아 '
@@ -154,15 +186,19 @@ def render_meta(ex, fr) -> None:
     st.markdown(
         f"""
         <div class="result-card">
-            <div class="card-title">0. 조건 추출 {"".join(tags)}</div>
+            <div class="card-title">0. 조건 추출 · 후보 좁히기
+                {"".join(tags)}</div>
             <div class="query-origin">질의 · {escape(ex.question)}</div>
-            {items}
+            {picked}
+            {funnel}
             {relaxed}
-            <div class="query-note">질문에서 사람·기간·키워드를 뽑아 그 조건에
-                맞는 청크만 남긴 뒤, 그 안에서 1단계 검색을 합니다. 사람은
-                닉네임 명부에 있는 것만 씁니다(없는 이름은 버립니다). 보낸 사람과
-                받는 사람은 나누지 않습니다 — 찾는 것은 그 사람이 낀 대화라
-                대화쌍(dyad) 안에 있는지만 봅니다.</div>
+            <div class="query-note">4B 가 질문에서 사람·기간·키워드를 뽑고,
+                두 채널이 각각 청크를 고른 뒤 교집합 안에서만 검색합니다.
+                사람은 닉네임 명부에 있는 것만 씁니다(없는 이름은 버립니다).
+                보낸 사람과 받는 사람은 나누지 않습니다 — 찾는 것은 그 사람이 낀
+                대화라 대화쌍(dyad) 안에 있는지만 봅니다. 키워드는 본문에 글자
+                그대로 있는지를 봅니다(IP·파일명처럼 임베딩이 제일 못하는 것).
+                한쪽이 0개가 되면 그 조건을 풀고 넓힙니다.</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -184,16 +220,12 @@ def render_search(sr) -> None:
     else:
         items = '<div class="query-note">검색된 청크가 없습니다.</div>'
 
-    # 0단계가 좁혔으면 전체 청크 수 대신 후보 수를 보여 준다. 상위 몇 개를
-    # 무엇 중에서 골랐는지가 이 줄의 뜻이다.
-    pool = (f"후보 {sr.n_candidates:,}개" if sr.filtered
-            else f"청크 {sr.n_indexed}개")
     st.markdown(
         f"""
         <div class="result-card">
             <div class="card-title">1. 검색 랭킹
                 <span class="tag">{escape(sr.doc_label)}</span>
-                <span class="tag">{pool} → 상위 {sr.top_k}개</span>
+                <span class="tag">{sr.pool} → 상위 {sr.top_k}개</span>
                 <span class="tag">{sr.elapsed:.1f}초</span></div>
             <div class="query-origin">질의 · {escape(sr.query)}</div>
             {items}
@@ -378,7 +410,7 @@ def render_all(result: PipelineResult) -> None:
     와 같아야 한다.
     """
     if result.extract:
-        render_meta(result.extract, result.filter)          # 0
+        render_meta(result.extract, result.filter, result.narrow)   # 0
     if result.search:
         render_search(result.search)                        # 1
     if result.rerank:
@@ -435,11 +467,21 @@ def dev_payload(result: PipelineResult) -> dict:
                 "n_kept": result.filter.n_kept,
                 "n_total": result.filter.n_total,
             },
+            "narrow": None if result.narrow is None else {
+                "n_chunks": result.narrow.n_chunks,
+                "n_meta": result.narrow.n_meta,
+                "n_keyword": result.narrow.n_keyword,
+                "n_both": result.narrow.n_both,
+                "n_used": result.narrow.n_used,
+                "step": result.narrow.step,
+                "keywords": result.narrow.keywords,
+            },
         },
         "1_search": {
             "query": sr.query,
             "n_indexed": sr.n_indexed,
             "n_candidates": sr.n_candidates,
+            "n_candidate_chunks": sr.n_candidate_chunks,
             "narrowed": sr.narrowed,
             "keywords": sr.keywords,
             "n_docs": sr.n_docs,
@@ -1203,20 +1245,25 @@ with tab_demo:
             "찾고 있습니다. (예상 시간: 20초)"
         )
 
-        # 0단계는 카드 하나를 둘이 나눠 채운다. extract 결과를 들고 있다가
-        # filter 가 끝나면 함께 그린다.
+        # 0단계는 카드 하나를 셋이 나눠 채운다(추출 -> 메타 -> 키워드·교집합).
+        # 앞 둘을 들고 있다가 narrow 가 끝나면 한 번에 그린다.
         stage0: dict = {}
 
         def on_stage(stage: str, payload) -> None:
             """단계가 끝날 때마다 불린다. 끝난 단계부터 바로 그린다."""
             if stage == "extract":
                 stage0["extract"] = payload
-                progress.info("뽑은 조건으로 후보 청크를 좁히고 있습니다.")
+                progress.info("뽑은 조건에 해당하는 청크를 세고 있습니다.")
 
             elif stage == "filter":
-                render_meta(stage0.get("extract"), payload)   # 0번
+                stage0["filter"] = payload
+
+            elif stage == "narrow":
+                # 0번 카드는 추출·메타·키워드 세 결과가 다 모여야 그릴 수 있다.
+                render_meta(stage0.get("extract"), stage0.get("filter"),
+                            payload)
                 progress.info(
-                    f"후보 {payload.n_kept:,}개 안에서 질의를 {EMBED_SHORT} 로 "
+                    f"후보 {payload.n_used:,}개 안에서 질의를 {EMBED_SHORT} 로 "
                     "임베딩해 청크를 찾고 있습니다."
                 )
 

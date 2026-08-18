@@ -33,7 +33,7 @@ from filter_metadata import FilterResult, MetaQuery  # noqa: E402
 from grade import GradeResult  # noqa: E402
 from main import PipelineResult  # noqa: E402
 from rerank import RankedHit, RerankResult  # noqa: E402
-from search import Hit, SearchResult  # noqa: E402
+from search import Hit, Narrowing, SearchResult  # noqa: E402
 
 # 계약 버전. 필드를 바꾸면 올린다. 서버와 클라이언트가 다르면 경고만 남기고
 # 계속 돈다 (양쪽 배포 시점이 어긋나도 데모가 멈추지는 않게).
@@ -135,6 +135,40 @@ def filter_from_dict(d: dict | None) -> FilterResult | None:
     )
 
 
+def narrow_to_dict(nr: Narrowing | None) -> dict | None:
+    """
+    두 채널의 후보 수. keep/bonus 배열은 보내지 않는다.
+
+    31,044칸짜리 배열이고, 화면이 쓰는 것은 숫자 네 개뿐이다. 좁히기는 이미
+    GPU 서버에서 끝나 검색 결과에 반영돼 있다.
+    """
+    if nr is None:
+        return None
+    return {
+        "n_chunks": int(nr.n_chunks),
+        "n_meta": None if nr.n_meta is None else int(nr.n_meta),
+        "n_keyword": None if nr.n_keyword is None else int(nr.n_keyword),
+        "n_both": None if nr.n_both is None else int(nr.n_both),
+        "n_used": int(nr.n_used),
+        "step": nr.step,
+        "keywords": list(nr.keywords),
+    }
+
+
+def narrow_from_dict(d: dict | None) -> Narrowing | None:
+    if d is None:
+        return None
+    return Narrowing(
+        n_chunks=int(d.get("n_chunks", 0)),
+        n_meta=d.get("n_meta"),
+        n_keyword=d.get("n_keyword"),
+        n_both=d.get("n_both"),
+        n_used=int(d.get("n_used", 0)),
+        step=d.get("step", ""),
+        keywords=list(d.get("keywords", [])),
+    )
+
+
 # --------------------------------------------------------------------------
 # 1 단계 : 검색
 # --------------------------------------------------------------------------
@@ -178,6 +212,7 @@ def search_to_dict(sr: SearchResult | None) -> dict | None:
         "hits": [hit_to_dict(h) for h in sr.hits],
         "n_indexed": int(sr.n_indexed),
         "n_candidates": int(sr.n_candidates),
+        "n_candidate_chunks": int(sr.n_candidate_chunks),
         "n_docs": int(sr.n_docs),
         "keywords": list(sr.keywords),
         "narrowed": sr.narrowed,
@@ -197,6 +232,7 @@ def search_from_dict(d: dict | None) -> SearchResult | None:
         n_indexed=int(d["n_indexed"]),
         # 필터를 붙이기 전 판본이 보낸 응답에는 없다. 없으면 안 좁힌 것으로 본다.
         n_candidates=int(d.get("n_candidates") or d["n_indexed"]),
+        n_candidate_chunks=int(d.get("n_candidate_chunks", 0)),
         n_docs=int(d["n_docs"]),
         keywords=list(d.get("keywords", [])),
         narrowed=d.get("narrowed", ""),
@@ -340,6 +376,7 @@ def result_to_dict(r: PipelineResult) -> dict:
         "doc_name": r.doc_name,
         "extract": extract_to_dict(r.extract),
         "filter": filter_to_dict(r.filter),
+        "narrow": narrow_to_dict(r.narrow),
         "search": search_to_dict(r.search),
         "rerank": rerank_to_dict(r.rerank),
         "answer": answer_to_dict(r.answer),
@@ -356,6 +393,7 @@ def result_from_dict(d: dict) -> PipelineResult:
         doc_name=d["doc_name"],
         extract=extract_from_dict(d.get("extract")),
         filter=filter_from_dict(d.get("filter")),
+        narrow=narrow_from_dict(d.get("narrow")),
         search=search_from_dict(d.get("search")),
         rerank=rerank_from_dict(d.get("rerank")),
         answer=answer_from_dict(d.get("answer")),
@@ -368,6 +406,7 @@ def result_from_dict(d: dict) -> PipelineResult:
 STAGE_TO_DICT = {
     "extract": extract_to_dict,
     "filter": filter_to_dict,
+    "narrow": narrow_to_dict,
     "search": search_to_dict,
     "rerank": rerank_to_dict,
     "answer": answer_to_dict,
@@ -377,6 +416,7 @@ STAGE_TO_DICT = {
 STAGE_FROM_DICT = {
     "extract": extract_from_dict,
     "filter": filter_from_dict,
+    "narrow": narrow_from_dict,
     "search": search_from_dict,
     "rerank": rerank_from_dict,
     "answer": answer_from_dict,
@@ -405,10 +445,8 @@ def response_envelope(r: PipelineResult) -> dict:
         "meta": {
             "condition": r.extract.label() if r.extract else "",
             "keywords": list(r.extract.query.keywords) if r.extract else [],
-            "n_candidates": int(r.search.n_candidates) if r.search else 0,
-            "n_indexed": int(r.search.n_indexed) if r.search else 0,
-            "narrowed": r.search.narrowed if r.search else "",
             "step": r.filter.step if r.filter else "",
+            "narrow": narrow_to_dict(r.narrow),
         },
         "elapsed": _f(r.elapsed),
         "errors": r.errors(),
@@ -427,7 +465,8 @@ def _dummy() -> PipelineResult:
               chunk_index=12, token_start=6144, token_end=6656)
     sr = SearchResult(query="질문", doc="all", doc_label="전체 문서 7종",
                       top_k=10, hits=[hit], n_indexed=1100, n_candidates=20,
-                      n_docs=7, keywords=["68.224.217.72"],
+                      n_candidate_chunks=10, n_docs=7,
+                      keywords=["68.224.217.72"],
                       narrowed="메타 + 키워드 1개 모두", elapsed=1.5)
     rr = RerankResult(question="질문", method="cross",
                       ranked=[RankedHit(hit=hit, rank_before=3, rank_after=1,
@@ -448,12 +487,14 @@ def _dummy() -> PipelineResult:
                        source="llm+rule", elapsed=1.2, error="")
     fr = FilterResult(query=q, mask=None, n_total=15522, n_kept=20,
                       step="쌍", relaxed=["쌍 + 기간"])
+    nr = Narrowing(n_chunks=15522, n_meta=20, n_keyword=9, n_both=2, n_used=2,
+                   step="메타 + 키워드 1개", keywords=["68.224.217.72"])
     gr = GradeResult(question="질문", llm_answer="답입니다.",
                      candidates=["답"], matched=["답"], verdict="정답",
                      reason="후보 포함", gold_answer="답입니다.", elapsed=0.01)
     return PipelineResult(question="질문", raw_question="1. 질문", doc=None,
                           doc_name="전체 문서 7종", extract=ex, filter=fr,
-                          search=sr, rerank=rr,
+                          narrow=nr, search=sr, rerank=rr,
                           answer=ans, grade=gr, elapsed=43.5)
 
 
@@ -481,9 +522,14 @@ def main() -> None:
         ("필터 요약", before.filter.summary(), after.filter.summary()),
         ("필터 축소율", round(before.filter.ratio, 6),
          round(after.filter.ratio, 6)),
+        ("메타 후보", before.narrow.n_meta, after.narrow.n_meta),
+        ("키워드 후보", before.narrow.n_keyword, after.narrow.n_keyword),
+        ("교집합", before.narrow.n_both, after.narrow.n_both),
+        ("최종 후보", before.narrow.n_used, after.narrow.n_used),
         ("검색 청크 수", before.search.n_indexed, after.search.n_indexed),
         ("검색 후보 수", before.search.n_candidates, after.search.n_candidates),
         ("좁힌 방법", before.search.narrowed, after.search.narrowed),
+        ("후보 표기", before.search.pool, after.search.pool),
         ("1위 청크 id", before.search.hits[0].key, after.search.hits[0].key),
         ("1위 미리보기", before.search.hits[0].preview(50),
          after.search.hits[0].preview(50)),
