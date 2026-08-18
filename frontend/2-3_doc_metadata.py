@@ -158,27 +158,16 @@ def _kv_block(values: dict, title: str, hints: bool = False) -> str:
             f'{lines}</div>')
 
 
-def _same_condition(model_out: dict, used: dict) -> bool:
-    """두 조건이 사실상 같은가. 날짜를 편 것(2020-05 -> 2020-05-01)은 같게 본다."""
-    for key, _ in META_FIELDS:
-        mine, theirs = model_out.get(key, ""), used.get(key, "")
-        if mine == theirs:
-            continue
-        if key in ("since", "until") and mine and theirs.startswith(mine):
-            continue
-        return False
-    return True
-
-
 def render_meta(ex, fr, nr=None) -> None:
     """
     0. 조건 추출 + 후보 좁히기 — LLM 이 뱉은 JSON 을 그대로 네 줄로 보여 준다.
 
-    화면에 두는 것은 세 가지뿐이다.
-        1) 4B 가 출력한 JSON      people / since / until / keywords
-        2) 실제로 쓴 조건          (명부 대조·규칙 보완으로 달라졌을 때만)
-        3) 몇 개로 좁혔는지        한 줄
-    나머지 설명과 원본 JSON 은 카드 밑 접이칸으로 내렸다.
+    화면에 두는 것은 두 가지뿐이다.
+        1) 조건 여섯 칸  sender / receiver / participants / since / until /
+                        keywords — 검증을 마치고 실제로 검색에 쓴 값이다
+        2) 몇 개로 좁혔는지  '필터링' 한 줄
+    4B 가 적어 보낸 원문 JSON 과 나머지 설명은 카드 밑 접이칸으로 내렸다.
+    버려진 이름이 있으면 그것만 한 줄로 따로 알린다.
     """
     if ex is None:
         return
@@ -198,17 +187,12 @@ def render_meta(ex, fr, nr=None) -> None:
         model_out = _kv_map(ex.raw)
         title = "규칙이 뽑은 값 (4B 를 못 썼습니다)"
 
-    # 명부에 없는 이름을 버렸거나, 빈 칸을 규칙이 메웠으면 두 값이 갈린다.
-    # 그때만 두 번째 블록을 붙인다 (같으면 같은 줄을 두 번 읽힐 뿐이다).
-    #
-    # 날짜 표기 차이는 갈린 것으로 세지 않는다. 4B 가 '2020-05' 로 적고 필터가
-    # '2020-05-01' 로 편 것뿐인데 블록을 두 벌 그리면, 읽는 사람은 모델이
-    # 틀려서 고쳐진 줄로 오해한다. 그 경우에는 편 값 한 벌만 보여 준다
-    # (모델이 적어 보낸 글자 그대로는 카드 밑 '원본 JSON' 에 남아 있다).
-    changed = not _same_condition(model_out, used)
-    blocks = _kv_block(model_out if changed else used, title, hints=True)
-    if ex.source != "off" and changed:
-        blocks += _kv_block(used, "실제로 검색에 쓴 조건")
+    # 블록은 늘 한 벌이다. 실제로 검색에 쓴 값(명부 대조와 날짜 펴기를 마친
+    # 것)을 보여 준다. 4B 가 적어 보낸 것과 갈린 부분은 아래 '버린 이름' 줄과
+    # 카드 밑 '원본 JSON' 접이칸이 말해 준다. 같은 여섯 줄을 두 벌 그리면
+    # 카드만 두 배로 길어지는데 정작 다른 칸은 보통 하나다.
+    blocks = _kv_block(model_out if ex.source == "off" else used, title,
+                       hints=True)
 
     dropped = ""
     if q.unknown:
@@ -263,7 +247,7 @@ def render_meta(ex, fr, nr=None) -> None:
         unsafe_allow_html=True,
     )
 
-    with st.expander("0단계 원본 JSON · 설명"):
+    with st.expander("원본 JSON"):
         st.json({"llm": ex.llm, "rule": ex.rule, "merged": ex.raw,
                  "used": {"people": q.people, "unknown": q.unknown,
                           "since": q.since, "until": q.until,
