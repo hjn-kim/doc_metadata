@@ -91,9 +91,6 @@ DOCUMENTS = documents()
 DOCUMENT_OPTIONS = {f"전체 문서 {len(DOCUMENTS)}종": ALL_DOCS}
 DOCUMENT_OPTIONS.update({doc.label: doc.key for doc in DOCUMENTS})
 
-# 부제에 적을 언어 이름. 코퍼스가 늘어도 따라오게 목록에서 뽑는다.
-CORPUS_LANGS = " + ".join(
-    dict.fromkeys(d.lang_name for d in DOCUMENTS if d.lang_name))
 
 QUESTIONS = load_questions()
 
@@ -264,7 +261,7 @@ def render_meta(ex, fr, nr=None) -> None:
 
 
 def render_search(sr) -> None:
-    """1. 검색 랭킹 — 질문을 임베딩해 뽑은 상위 청크. 한 항목이 정확히 한 줄."""
+    """2. 검색 랭킹 — 질문을 임베딩해 뽑은 상위 청크. 한 항목이 정확히 한 줄."""
     if sr.hits:
         items = "".join(
             f'<div class="hit-line">'
@@ -281,7 +278,7 @@ def render_search(sr) -> None:
     st.markdown(
         f"""
         <div class="result-card">
-            <div class="card-title">1. 검색 랭킹
+            <div class="card-title">2. 검색 랭킹
                 <span class="tag">{escape(sr.doc_label)}</span>
                 <span class="tag">{sr.pool} → 상위 {sr.top_k}개</span>
                 <span class="tag">{sr.elapsed:.1f}초</span></div>
@@ -299,7 +296,7 @@ def render_search(sr) -> None:
 
 
 def render_rerank(rr) -> None:
-    """2. 리랭킹 — 등수가 어떻게 바뀌었는지"""
+    """3. 리랭킹 — 등수가 어떻게 바뀌었는지"""
     method = {
         "cross": f"크로스인코더 {rr.model or RERANKER_MODEL}",
         "dense": "검색 점수 순서 (크로스인코더 실패)",
@@ -327,7 +324,7 @@ def render_rerank(rr) -> None:
     st.markdown(
         f"""
         <div class="result-card">
-            <div class="card-title">2. 리랭킹
+            <div class="card-title">3. 리랭킹
                 <span class="tag">{escape(method)}</span>
                 <span class="tag">{rr.elapsed:.1f}초</span></div>
             <div class="qtable-wrap">
@@ -353,7 +350,7 @@ def render_rerank(rr) -> None:
 
 
 def render_selected(rr) -> None:
-    """3. 최종 청크 선정"""
+    """4. 최종 청크 선정"""
     items = "".join(
         f'<div class="hit">'
         f'  <div class="hit-head">'
@@ -369,7 +366,7 @@ def render_selected(rr) -> None:
     st.markdown(
         f"""
         <div class="result-card">
-            <div class="card-title">3. 최종 청크 선정
+            <div class="card-title">4. 최종 청크 선정
                 <span class="tag">{len(rr.ranked)}개 → {len(rr.selected)}개</span>
                 <span class="tag">약 {len(rr.selected) * CHUNK_SIZE}토큰</span></div>
             {items}
@@ -380,14 +377,14 @@ def render_selected(rr) -> None:
 
 
 def render_answer(ans) -> None:
-    """4. LLM 답변"""
+    """5. LLM 답변"""
     if ans is None:
         return
     if not ans.ok:
         st.markdown(
             f"""
             <div class="result-card">
-                <div class="card-title">4. LLM 답변
+                <div class="card-title">5. LLM 답변
                     <span class="tag">실패</span></div>
                 <div class="query-note">{escape(ans.error or "")}</div>
             </div>
@@ -406,7 +403,7 @@ def render_answer(ans) -> None:
     st.markdown(
         f"""
         <div class="result-card answer-card">
-            <div class="card-title">4. LLM 답변 {badge}
+            <div class="card-title">5. LLM 답변 {badge}
                 <span class="tag">{ans.elapsed:.1f}초</span></div>
             <div class="answer-text">{escape(ans.answer)}</div>
             <div class="cite-row">근거 {cites}</div>
@@ -419,11 +416,7 @@ def render_answer(ans) -> None:
 
 def render_grade(gr, selected=None) -> None:
     """
-    5. 정답 비교 — 최종 청크에 정답 청크가 들었는지.
-
-    맞았다고 초록으로 칠하지 않는다. 이 판정은 '근거를 찾아왔는가' 까지만
-    보는 것이라(답변 문장이 맞는지는 안 본다) 성공 배지로 읽히면 실제보다
-    세게 들린다. 틀렸을 때만 눈에 띄게 둔다.
+    6. 정답 비교 — 최종 청크에 정답 청크가 들었는지.
     """
     if gr is None:
         return
@@ -462,7 +455,7 @@ def render_grade(gr, selected=None) -> None:
     st.markdown(
         f"""
         <div class="result-card grade-card {style}">
-            <div class="card-title">5. 정답 비교
+            <div class="card-title">6. 정답 비교
                 <span class="tag tag-verdict {style}">{mark} {gr.verdict}</span>
                 <span class="tag">{escape(gr.method)} 판정</span></div>
             {body}
@@ -1280,8 +1273,7 @@ st.markdown(
 # ---------------------------------------------------------
 st.markdown('<h1 class="main-title">문서 메타데이터 테스트 페이지</h1>', unsafe_allow_html=True)
 st.markdown(
-    f'<p class="subtitle">{escape(EMBED_SHORT)}, {escape(RERANKER_SHORT)}, '
-    f'{" (" + escape(CORPUS_LANGS) + ")" if CORPUS_LANGS else ""}</p>',
+    f'<p class="subtitle">{escape(EMBED_SHORT)}, {escape(RERANKER_SHORT)}, </p>',
     unsafe_allow_html=True,
 )
 
