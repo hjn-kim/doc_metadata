@@ -1,21 +1,22 @@
 """
 화면 전용 데모 앱 (CPU 서버) - 계산은 GPU 서버가 한다.
 
-    [이 서버 : CPU]                      [GPU 서버]
-    frontend/app.py   --- HTTP --->      backend/src/server.py
-    frontend/rag_api.py                    1 질의 임베딩  BAAI/bge-m3
-                      <--- 단계별 ----      2 리랭킹      bge-reranker-v2-m3
-                           NDJSON           4 답변 생성   Qwen/Qwen3-4B
-                                          + data/ (원문·색인·정답표)
+    [이 서버 : CPU]                          [GPU 서버]
+    frontend/2-3_doc_metadata.py --- HTTP --> backend/src/server.py
+    frontend/rag_api.py                        0 조건 추출  Qwen3-4B + 규칙
+                      <--- 단계별 ------        1 질의 임베딩 BAAI/bge-m3
+                           NDJSON               2 리랭킹     bge-reranker-v2-m3
+                                                4 답변 생성  Qwen/Qwen3-4B
+                                              + data/ (대화 로그·색인·정답표)
 
-이 서버에는 모델도 색인도 없다. 문서 목록·질문 세트·모델 이름은 /rag/meta 에서
+이 서버에는 모델도 색인도 없다. 코퍼스 목록·질문 세트·모델 이름은 /rag/meta 에서
 받아 오고, 검색은 /rag/search 로 넘긴다. 필요한 패키지는 streamlit 과 requests
 뿐이다.
 
-    RAG_API_BASE   GPU 서버 주소 (기본 http://147.46.15.89:58566)
+    RAG_API_BASE   GPU 서버 주소 (기본 http://147.46.15.89:58567)
     RAG_API_KEY    설정돼 있으면 X-API-Key 로 보낸다
 
-    streamlit run app.py --server.address 0.0.0.0 --server.port 8501
+    streamlit run 2-3_doc_metadata.py --server.address 0.0.0.0 --server.port 8501
 """
 
 import re
@@ -25,9 +26,11 @@ from pathlib import Path
 
 import streamlit as st
 
-# rag_api.py 는 한 단계 위의 document_lab/ 에 있다 (어느 경로에서 띄우든 찾도록).
-LIB_DIR = Path(__file__).resolve().parent.parent / "document_lab"
-sys.path.insert(0, str(LIB_DIR))
+# rag_api.py 는 이 파일 옆에 있다. 어느 경로에서 띄우든 찾도록 직접 넣는다
+# (streamlit 이 스크립트 폴더를 넣어 주긴 하지만, 옛 판본이 다른 폴더에 남아
+# 있으면 그쪽이 먼저 잡혀 화면만 옛것으로 도는 일이 있었다).
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
 from rag_api import (  # noqa: E402
     ALL_DOCS,
     API_BASE,
@@ -67,7 +70,7 @@ RERANKER_SHORT = RERANKER_MODEL.split("/")[-1]
 # set_page_config 는 다른 st.* 호출보다 반드시 먼저 와야 한다.
 # (제목은 스타일이 주입된 뒤 아래 "화면" 절에서 그린다)
 st.set_page_config(
-    page_title="문서 AI 모델 데모 (GPU)",
+    page_title="문서 메타데이터 테스트 페이지",
     page_icon="🔎",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -77,16 +80,20 @@ st.set_page_config(
 # ---------------------------------------------------------
 # 선택 항목
 #
-# 질문은 data/qa.json, 문서는 data/emb 에서 읽는다. 앱에는 목록을 적어 두지
-# 않는다. 문서나 질문을 늘려도 코드를 고칠 일이 없게 하려는 것이다.
+# 질문은 data/qa/qa.json, 코퍼스는 data/emb 에서 읽는다. 앱에는 목록을 적어
+# 두지 않는다. 코퍼스나 질문을 늘려도 코드를 고칠 일이 없게 하려는 것이다.
 # ---------------------------------------------------------
 DOCUMENTS = documents()
 
-# 화면에 보일 이름 -> 파이프라인에 넘길 문서 키. 첫 항목이 기본값이다.
-# 전체 검색이 기본인 이유: 질문만 던지면 7개 문서 중 어디에 답이 있는지 모델이
-# 찾아내는 편이 데모로서 정직하다.
+# 화면에 보일 이름 -> 파이프라인에 넘길 코퍼스 키. 첫 항목이 기본값이다.
+# 전체 검색이 기본인 이유: 같은 대화가 러시아어 원문과 영어 번역 두 벌로 들어
+# 있어, 어느 벌에서 걸리는지까지 보여 주는 편이 데모로서 정직하다.
 DOCUMENT_OPTIONS = {f"전체 문서 {len(DOCUMENTS)}종": ALL_DOCS}
 DOCUMENT_OPTIONS.update({doc.label: doc.key for doc in DOCUMENTS})
+
+# 부제에 적을 언어 이름. 코퍼스가 늘어도 따라오게 목록에서 뽑는다.
+CORPUS_LANGS = " + ".join(
+    dict.fromkeys(d.lang_name for d in DOCUMENTS if d.lang_name))
 
 QUESTIONS = load_questions()
 
@@ -96,7 +103,7 @@ CUSTOM_QUESTION = "직접 질문"
 QUESTION_OPTIONS = [CUSTOM_QUESTION] + [q.label for q in QUESTIONS]
 
 PIPELINE_STEPS = [
-    "조건 추출 · 후보 좁히기",
+    "메타데이터 추출",
     "검색 랭킹",
     "리랭킹",
     "최종 청크 선정",
@@ -112,59 +119,99 @@ PIPELINE_STEPS = [
 # 카드 하나를 그리고 끝낸다. 계산은 하지 않는다.
 # ---------------------------------------------------------
 
+# 0단계 카드에 적는 칸. LLM 이 뽑아 주는 JSON 의 키 그대로이고, 값이 비어도
+# 줄은 남긴다 — 무엇을 못 뽑았는지가 뽑은 것만큼 중요하다.
+META_FIELDS = (
+    ("sender", "sender"),
+    ("receiver", "receiver"),
+    ("participants", "participants"),
+    ("since", "since"),
+    ("until", "until"),
+    ("keywords", "keywords"),
+)
+
+
+
+def _kv_text(value) -> str:
+    """JSON 값 하나를 한 줄 문자열로. 빈 값은 빈 문자열."""
+    if isinstance(value, (list, tuple, set)):
+        return ", ".join(str(v).strip() for v in value if str(v).strip())
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _kv_map(data: dict | None) -> dict:
+    """JSON(또는 MetaQuery 를 옮긴 dict) 을 칸 이름 -> 한 줄 로 만든다."""
+    data = data or {}
+    return {key: _kv_text(data.get(key)) for key, _ in META_FIELDS}
+
+
+def _kv_block(values: dict, title: str, hints: bool = False) -> str:
+    """key : value 를 한 줄씩. 네 칸을 늘 다 그린다."""
+    lines = "".join(
+        f'<div class="kv-line">'
+        f'<span class="kv-key">{escape(label)}</span>'
+        f'<span class="kv-val{"" if values.get(key) else " kv-empty"}">'
+        f'{escape(values.get(key) or "—")}</span>'
+        + '</div>'
+        for key, label in META_FIELDS
+    )
+    return (f'<div class="kv-block"><div class="kv-head">{escape(title)}</div>'
+            f'{lines}</div>')
+
+
 def render_meta(ex, fr, nr=None) -> None:
     """
-    0. 조건 추출 + 후보 좁히기 — 두 채널이 각각 몇 개를 남겼고 교집합이 몇 개인가.
+    0. 조건 추출 + 후보 좁히기 — LLM 이 뱉은 JSON 을 그대로 네 줄로 보여 준다.
 
-    숫자를 채널별로 다 보여 준다. 교집합만 보여 주면 "왜 이만큼 줄었는지" 를
-    화면에서 되짚을 수 없다.
+    화면에 두는 것은 세 가지뿐이다.
+        1) 4B 가 출력한 JSON      people / since / until / keywords
+        2) 실제로 쓴 조건          (명부 대조·규칙 보완으로 달라졌을 때만)
+        3) 몇 개로 좁혔는지        한 줄
+    나머지 설명과 원본 JSON 은 카드 밑 접이칸으로 내렸다.
     """
     if ex is None:
         return
 
     q = ex.query
-    cond = []
-    if len(q.people) >= 2:
-        cond.append(("사람", " ~ ".join(q.people)))
-    elif q.people:
-        cond.append(("사람", q.people[0]))
-    if q.since or q.until:
-        cond.append(("기간", f"{q.since or '...'} ~ {q.until or '...'}"))
-    if q.keywords:
-        cond.append(("키워드", ", ".join(q.keywords)))
-    if q.unknown:
-        cond.append(("버린 이름", ", ".join(q.unknown) + " (명부에 없음)"))
-    if not cond:
-        cond.append(("조건", "없음 — 전체 청크를 그대로 뒤집니다"))
+    used = _kv_map({"sender": q.sender, "receiver": q.receiver,
+                    "participants": q.participants, "since": q.since,
+                    "until": q.until, "keywords": q.keywords})
 
-    picked = "".join(
-        f'<div class="hit-line">'
-        f'<span class="hit-rank">·</span>'
-        f'<span class="hit-src">{escape(name)}</span>'
-        f'<span class="hit-oneline">{escape(value)}</span>'
-        f'</div>'
-        for name, value in cond
-    )
+    if ex.source == "off":
+        model_out = _kv_map(None)
+        title = "조건 추출을 껐습니다 (전체 청크를 그대로 뒤집니다)"
+    elif ex.llm:
+        model_out = _kv_map(ex.llm)
+        title = f"{LLM_SHORT} 가 출력한 JSON"
+    else:
+        model_out = _kv_map(ex.raw)
+        title = "규칙이 뽑은 값 (4B 를 못 썼습니다)"
+
+    blocks = _kv_block(model_out, title, hints=True)
+    # 명부에 없는 이름을 버렸거나, 빈 칸을 규칙이 메웠으면 두 값이 갈린다.
+    # 그때만 두 번째 블록을 붙인다 (같으면 같은 줄을 두 번 읽힐 뿐이다).
+    if ex.source != "off" and used != model_out:
+        blocks += _kv_block(used, "실제로 검색에 쓴 조건")
+
+    dropped = ""
+    if q.unknown:
+        dropped = (f'<div class="query-note">명부(nicks.json)에 없어 버린 이름 · '
+                   f'{escape(", ".join(q.unknown))}</div>')
 
     funnel = ""
     if nr is not None:
         def count(value):
             return "-" if value is None else f"{value:,}"
 
-        rows = [
-            ("메타 해당", count(nr.n_meta), "사람·기간으로 고른 청크"),
-            ("키워드 해당", count(nr.n_keyword),
-             "본문에 그 글자가 있는 청크"),
-            ("교집합", count(nr.n_both if nr.n_both is not None else nr.n_used),
-             f"검색은 이 안에서 합니다 ({escape(nr.step)})"),
-        ]
-        funnel = "".join(
-            f'<div class="hit-line">'
-            f'<span class="hit-score">{value}</span>'
-            f'<span class="hit-src">{escape(name)}</span>'
-            f'<span class="hit-oneline">{note}</span>'
+        both = nr.n_both if nr.n_both is not None else nr.n_used
+        funnel = (
+            f'<div class="kv-line">'
+            f'<span class="kv-key">필터링</span>'
+            f'<span class="kv-val">청크 {nr.n_chunks:,} → 메타 {count(nr.n_meta)}'
+            f' ∩ 키워드 {count(nr.n_keyword)} → {count(both)}</span>'
             f'</div>'
-            for name, value, note in rows
         )
 
     tags = [f'<span class="tag">{escape(ex.source)}</span>',
@@ -179,30 +226,41 @@ def render_meta(ex, fr, nr=None) -> None:
     relaxed = ""
     if fr is not None and fr.relaxed:
         relaxed = (f'<div class="query-note">조건이 너무 좁아 '
-                   f'{escape(" → ".join(fr.relaxed))} 을(를) 풀었습니다. '
-                   f'후보가 0개가 되면 답변이 반드시 틀리기 때문에, 좁은 조건부터 '
-                   f'걸어 보고 처음으로 남는 것을 씁니다.</div>')
+                   f'{escape(" → ".join(fr.relaxed))} 을(를) 풀었습니다.</div>')
+
+    error = ""
+    if ex.error:
+        error = (f'<div class="query-note">추출 중 오류 · '
+                 f'{escape(ex.error)}</div>')
 
     st.markdown(
         f"""
         <div class="result-card">
-            <div class="card-title">0. 조건 추출 · 후보 좁히기
+            <div class="card-title">1. 필터링
                 {"".join(tags)}</div>
-            <div class="query-origin">질의 · {escape(ex.question)}</div>
-            {picked}
+            {blocks}
             {funnel}
+            {dropped}
             {relaxed}
-            <div class="query-note">4B 가 질문에서 사람·기간·키워드를 뽑고,
-                두 채널이 각각 청크를 고른 뒤 교집합 안에서만 검색합니다.
-                사람은 닉네임 명부에 있는 것만 씁니다(없는 이름은 버립니다).
-                보낸 사람과 받는 사람은 나누지 않습니다 — 찾는 것은 그 사람이 낀
-                대화라 대화쌍(dyad) 안에 있는지만 봅니다. 키워드는 본문에 글자
-                그대로 있는지를 봅니다(IP·파일명처럼 임베딩이 제일 못하는 것).
-                한쪽이 0개가 되면 그 조건을 풀고 넓힙니다.</div>
+            {error}
         </div>
         """,
         unsafe_allow_html=True,
     )
+
+    with st.expander("0단계 원본 JSON · 설명"):
+        st.json({"llm": ex.llm, "rule": ex.rule, "merged": ex.raw,
+                 "used": {"people": q.people, "unknown": q.unknown,
+                          "since": q.since, "until": q.until,
+                          "keywords": q.keywords}})
+        st.caption(
+            "4B 가 질문에서 사람·기간·키워드를 뽑고, 두 채널(메타·키워드)이 각각 "
+            "청크를 고른 뒤 교집합 안에서만 검색합니다. 사람은 닉네임 명부에 있는 "
+            "것만 씁니다(없는 이름은 버립니다). 보낸 사람과 받는 사람은 나누지 "
+            "않습니다 — 찾는 것은 그 사람이 낀 대화라 대화쌍(dyad) 안에 있는지만 "
+            "봅니다. 키워드는 본문에 글자 그대로 있는지를 봅니다(IP·파일명처럼 "
+            "임베딩이 제일 못하는 것). 한쪽이 0개가 되면 그 조건을 풀고 넓힙니다."
+        )
 
 
 def render_search(sr) -> None:
@@ -285,8 +343,8 @@ def render_rerank(rr) -> None:
                 붙여 읽고 낸 점수입니다. 순서는 반올림하지 않은 raw logit 으로
                 정하고 표에는 그것을 확률로 바꿔 적었습니다. 질문과 청크의 언어가
                 다르면 확률 자체는 1% 아래로 깔리지만 후보끼리의 순서는 그대로
-                유효합니다. 질의와 청크를 같이 읽으므로 "낱말만 겹치는 목차 청크"와
-                "답이 실제로 든 조문 청크"를 더 잘 가릅니다.
+                유효합니다. 질의와 청크를 같이 읽으므로 "낱말만 겹치는 잡담 청크"와
+                "증거가 실제로 든 대화 청크"를 더 잘 가릅니다.
             </div>
         </div>
         """,
@@ -359,42 +417,56 @@ def render_answer(ans) -> None:
     )
 
 
-def render_grade(gr) -> None:
-    """5. 정답 비교 — data/qa.json 의 정답과 4단계 답변을 나란히 놓는다."""
+def render_grade(gr, selected=None) -> None:
+    """
+    5. 정답 비교 — 최종 청크에 정답 청크가 들었는지.
+
+    맞았다고 초록으로 칠하지 않는다. 이 판정은 '근거를 찾아왔는가' 까지만
+    보는 것이라(답변 문장이 맞는지는 안 본다) 성공 배지로 읽히면 실제보다
+    세게 들린다. 틀렸을 때만 눈에 띄게 둔다.
+    """
     if gr is None:
         return
 
-    if gr.correct:
-        style, mark = "grade-ok", "O"
-    elif gr.verdict == "오답":
+    if gr.verdict == "오답":
         style, mark = "grade-no", "X"
     else:
-        style, mark = "grade-none", "?"
+        style, mark = "grade-none", "O" if gr.correct else "?"
 
-    hit_words = ", ".join(gr.matched) if gr.matched else "없음"
+    by_chunk = gr.method.startswith("최종 청크")
+    if by_chunk:
+        picked = ", ".join(dict.fromkeys(
+            f"#{h.chunk_index}" for h in (selected or []))) or "—"
+        rows = [
+            ("정답 청크", ", ".join(gr.candidates) or "—"),
+            ("최종 청크", picked),
+            ("겹친 청크", f"{mark} " + (", ".join(gr.matched) or "없음")),
+            ("LLM 답변", gr.llm_answer or "—"),
+        ]
+    else:
+        rows = [
+            ("LLM 답변", gr.llm_answer or "—"),
+            ("실제 정답", gr.gold_display or "—"),
+            ("정답 후보", ", ".join(gr.candidates) or "—"),
+            ("겹친 후보", f"{mark} " + (", ".join(gr.matched) or "없음")),
+        ]
+
+    body = "".join(
+        f'<div class="grade-row">'
+        f'<span class="grade-label">{escape(label)}</span>'
+        f'<span class="grade-value">{escape(value)}</span>'
+        f'</div>'
+        for label, value in rows
+    )
+
     st.markdown(
         f"""
         <div class="result-card grade-card {style}">
             <div class="card-title">5. 정답 비교
                 <span class="tag tag-verdict {style}">{mark} {gr.verdict}</span>
-                <span class="tag">문자열 포함 판정</span></div>
-            <div class="grade-row">
-                <span class="grade-label">LLM 답변</span>
-                <span class="grade-value">{escape(gr.llm_answer) or "—"}</span>
-            </div>
-            <div class="grade-row">
-                <span class="grade-label">실제 정답</span>
-                <span class="grade-value grade-gold">
-                    {escape(gr.gold_display) or "—"}</span>
-            </div>
-            <div class="grade-row">
-                <span class="grade-label">정답 후보</span>
-                <span class="grade-value">{escape(", ".join(gr.candidates))}</span>
-            </div>
-            <div class="grade-row">
-                <span class="grade-label">겹친 후보</span>
-                <span class="grade-value">{mark} {escape(hit_words)}</span>
-            </div>
+                <span class="tag">{escape(gr.method)} 판정</span></div>
+            {body}
+            <div class="query-note">{escape(gr.reason)}</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -417,7 +489,7 @@ def render_all(result: PipelineResult) -> None:
         render_rerank(result.rerank)                        # 2
         render_selected(result.rerank)                      # 3
     render_answer(result.answer)                            # 4
-    render_grade(result.grade)                              # 5
+    render_grade(result.grade, result.selected)             # 5
 
 
 def render_tail(result: PipelineResult, gold: list, note: str = "") -> None:
@@ -600,9 +672,12 @@ def render_dataset_tab() -> None:
         st.markdown(
             f"""
             <div class="result-card">
-                <div class="dtitle">문서 {len(rows)}종</div>
-                <div class="ddesc">각국의 마약·부패·자금세탁·고문방지 관련 법령과
-                    문서입니다. 원문 언어는 7가지 언어이고 질문은 한국어로 번역 없이 교차 검색합니다.</div>
+                <div class="dtitle">Conti Jabber 로그 · 코퍼스 {len(rows)}벌</div>
+                <div class="ddesc">Conti 랜섬웨어 조직의 Jabber 1:1 대화 로그입니다
+                    (2020-06-21 ~ 11-16 · 106,566행 · 닉네임 289명 · 대화쌍 1,114개).
+                    같은 대화가 러시아어 원문과 영어 번역 두 벌로 들어 있고, 청크 경계를
+                    영어 기준으로 한 번만 계산했기 때문에 두 벌의 청크 번호가 서로
+                    같습니다. 질문은 한국어로 던지고 번역 없이 교차 검색합니다.</div>
                 <table class="dtable dtable-docs">
                     <thead>{head}</thead><tbody>{body}</tbody>
                 </table>
@@ -615,8 +690,9 @@ def render_dataset_tab() -> None:
         )
     else:
         st.warning(
-            "문서 목록을 받지 못했습니다. GPU 서버가 떠 있는지, 색인"
-            "(`backend/data/emb`)이 있는지 확인하세요."
+            "코퍼스 목록을 받지 못했습니다. GPU 서버가 떠 있는지, 청크"
+            "(`backend/data/chunks`)와 색인(`backend/data/emb`)이 있는지 "
+            "확인하세요."
         )
 
     st.markdown('<div class="section-gap"></div>', unsafe_allow_html=True)
@@ -627,22 +703,35 @@ def render_dataset_tab() -> None:
         <div class="result-card">
             <div class="dtitle">전처리</div>
             {_kv_table([
-                ("본문 추출",
-                 "PDF 에서 뽑은 파일은 JSON 에 담겨 있어 text 필드만 "
-                 "꺼내 씁니다."),
+                ("정제",
+                 "원본 CSV(107,967행)에서 HTML 엔티티·앞뒤 공백·시스템 메시지·"
+                 "그룹채팅방(conference) 22행·화자 중복 270행을 걷어내 "
+                 "106,566행을 남깁니다. 짧다고 버리지 않습니다 — 세션 200자 "
+                 "필터를 걸면 BTC 주소의 43%, IP 의 26% 가 사라집니다."),
+                ("세션 분리",
+                 "메시지 1건은 중앙값 20자라 그대로 임베딩하면 'Ok' 3,118개가 "
+                 "같은 벡터가 됩니다. 대화쌍(dyad)별로 모은 뒤 1시간 gap 으로 "
+                 "끊어 12,478 세션을 만듭니다."),
                 ("청킹",
-                 f"{CHUNK_SIZE} / {OVERLAP}토큰 — bge-m3 토크나이저로 "
-                 f"{CHUNK_SIZE}토큰마다 자르고 {OVERLAP}토큰을 겹칩니다. "
-                 ),
-                ("겹치는 이유",
-                 "한 조문이 청크 경계에 걸려 잘리면 답의 앞뒤가 나뉩니다. "
-                 f"{OVERLAP}토큰을 겹쳐 그 경계를 덮습니다."),
+                 f"{CHUNK_SIZE} / {OVERLAP}토큰 — 세션 안에서만 bge-m3 "
+                 f"토크나이저로 {CHUNK_SIZE}토큰마다 자르고 {OVERLAP}토큰을 "
+                 f"겹칩니다. 자르는 자리는 발화 경계로 스냅합니다. "
+                 f"512토큰을 넘는 세션은 7% 뿐입니다."),
+                ("두 벌의 청크 번호가 같은 이유",
+                 "청크 경계를 영어 기준으로 한 번만 계산해 두 언어에 그대로 "
+                 "적용합니다(--split-basis en). 그래서 정답(청크 위치)도, "
+                 "메타데이터도 한 벌만 있으면 됩니다."),
+                ("청크 메타데이터",
+                 "청크마다 대화쌍(dyad)과 걸친 구간(ts_start~ts_end)을 따로 "
+                 "저장합니다(chunk_meta.npz). 0단계 필터가 읽는 것이 이것이고, "
+                 "벡터에는 들어가지 않습니다. 보낸 사람과 받는 사람은 나누지 "
+                 "않습니다 — 찾는 것은 그 사람이 낀 대화입니다."),
+                ("닉네임 명부",
+                 "289명을 nicks.json 에 모아 둡니다. 0단계가 뽑은 이름은 이 "
+                 "명부에 있는 것만 씁니다(4B 가 지어낸 이름을 여기서 버립니다)."),
                 ("정규화",
                  "벡터를 L2 정규화해 저장합니다. 검색이 내적을 그대로 코사인 "
                  "유사도로 쓸 수 있습니다."),
-                ("메타데이터",
-                 "청크마다 문서코드·청크번호·토큰 위치를 함께 저장합니다."
-                 "벡터에는 들어가지 않습니다."),
             ])}
         </div>
         """,
@@ -653,27 +742,49 @@ def render_dataset_tab() -> None:
 
     # ---- 질문-정답 세트 --------------------------------------------------
     if QUESTIONS:
-        by_doc: dict[str, int] = {}
-        for q in QUESTIONS:
-            by_doc[q.doc] = by_doc.get(q.doc, 0) + 1
-        body = "".join(
-            f'<tr><td class="dkey">{q.id}</td>'
-            f'<td>{escape(q.question)}'
-            f'<div class="dnote">정답 · {escape(q.answer)}</div></td>'
-            f'<td class="dnote">{escape(" / ".join(q.keywords))}</td></tr>'
-            for q in QUESTIONS
-        )
+        # 정답 후보(keywords)가 있어야 5단계가 돈다. 지금 Jabber 세트는 정답을
+        # 근거 청크 번호(answer_chunk_indices)로만 들고 있어 비어 있고, 그때는
+        # 빈 칸 두 줄을 그리는 대신 표를 줄이고 왜 비었는지 한 줄로 적는다.
+        gradable = [q for q in QUESTIONS if q.keywords or q.answer]
+
+        if gradable:
+            head = ("<tr><th>번호</th><th>질문 · 정답</th>"
+                    "<th>정답 후보</th></tr>")
+            body = "".join(
+                f'<tr><td class="dkey">{q.id}</td>'
+                f'<td>{escape(q.question)}'
+                + (f'<div class="dnote">정답 · {escape(q.answer)}</div>'
+                   if q.answer else "")
+                + f'</td>'
+                f'<td class="dnote">{escape(" / ".join(q.keywords))}</td></tr>'
+                for q in QUESTIONS
+            )
+            note = ("5단계는 정답 후보가 답변 안에 하나라도 들어 있는지만 "
+                    "봅니다.")
+        else:
+            head = "<tr><th>번호</th><th>질문</th></tr>"
+            body = "".join(
+                f'<tr><td class="dkey">{q.id}</td>'
+                f'<td>{escape(q.question)}</td></tr>'
+                for q in QUESTIONS
+            )
+            note = ("정답이 근거 청크 번호(<code>answer_chunk_indices</code>)로만 "
+                    "적혀 있고 답변에서 맞춰 볼 문자열이 없어, 지금은 "
+                    "5단계(정답 비교)를 건너뜁니다.")
+
         st.markdown(
             f"""
             <div class="result-card">
                 <div class="dtitle">질문-정답 세트 {len(QUESTIONS)}문항</div>
-                <div class="ddesc">원문을 읽고 만든 세트입니다
-                    (<code>backend/data/qa.json</code>). 질문과 정답은 한국어이고 근거는
-                    7개 언어이므로, 그대로 돌리면 교차 언어 검색 평가가 됩니다.
-                    5단계는 정답 후보가 답변 안에 하나라도 들어 있는지만 봅니다.</div>
+                <div class="ddesc">대화 로그를 읽고 만든 세트입니다
+                    (<code>backend/data/qa/qa.json</code>). 세 유형을 5문항씩
+                    두었습니다 — 날짜+키워드 · 화자+키워드 · 대화쌍+키워드.
+                    앞의 조건이 0단계가 뽑아야 할 것이고, 키워드는 본문에 글자
+                    그대로 나오는 것(파일명·랜섬웨어 이름·IP)입니다. 질문은
+                    한국어이고 근거는 러시아어·영어이므로 그대로 돌리면 교차 언어
+                    검색 평가가 됩니다. {note}</div>
                 <table class="dtable">
-                    <thead><tr><th>번호</th><th>질문 · 정답</th>
-                        <th>정답 후보</th></tr></thead>
+                    <thead>{head}</thead>
                     <tbody>{body}</tbody>
                 </table>
             </div>
@@ -881,6 +992,48 @@ st.markdown(
             line-height: 1.55;
         }
 
+        /* 0. 조건 추출 : LLM 이 뱉은 JSON 을 key : value 한 줄씩 */
+        .kv-block { margin: 0.35rem 0 0.15rem; }
+        .kv-head {
+            font-size: 0.86rem;
+            color: #475467;
+            font-weight: 700;
+            margin-bottom: 0.25rem;
+        }
+        .kv-line {
+            display: flex;
+            align-items: baseline;
+            gap: 0.7rem;
+            padding: 0.26rem 0;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 0.98rem;
+        }
+        /* 키와 값의 농도를 같이 간다. 한쪽만 연하면 읽는 사람이 그 줄을
+           덜 중요한 것으로 읽는데, 여기서는 못 뽑은 칸도 뽑은 칸만큼
+           중요하다 (비어 있다는 사실이 곧 정보다). */
+        .kv-key {
+            min-width: 7rem;
+            color: #1D2939;
+            font-weight: 700;
+        }
+        .kv-val {
+            color: #1D2939;
+            font-weight: 700;
+            overflow-wrap: anywhere;
+        }
+        .kv-val.kv-empty { color: #1D2939; font-weight: 700; }
+        /* 칸 뜻풀이. 자리가 모자라면 잘린다 (값이 먼저다) */
+        .kv-hint {
+            flex: 1;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-family: inherit;
+            font-size: 0.75rem;
+            color: #98A2B3;
+        }
+
         /* 1. 검색 랭킹 목록 : 한 항목이 정확히 한 줄 */
         .hit-line {
             display: flex;
@@ -938,12 +1091,12 @@ st.markdown(
         .cite-none { margin-left: 0.3rem; }
 
         /* 5. 정답 비교 */
-        .grade-card.grade-ok   { border-color: #8CE99A; background: #F4FCF5; }
+        /* 정답을 초록으로 칠하지 않는다 (render_grade 설명 참고).
+           틀렸을 때만 색을 준다. */
         .grade-card.grade-no   { border-color: #FFA8A8; background: #FFF5F5; }
         .grade-card.grade-none { border-color: #D0D5DD; }
 
         .tag-verdict { font-weight: 700; }
-        .tag-verdict.grade-ok   { background: rgba(47,158,68,.16);  color: #2B8A3E; }
         .tag-verdict.grade-no   { background: rgba(224,49,49,.14);  color: #C92A2A; }
         .tag-verdict.grade-none { background: #EAECF0; color: #667085; }
 
@@ -1125,10 +1278,11 @@ st.markdown(
 # ---------------------------------------------------------
 # 화면
 # ---------------------------------------------------------
-st.markdown('<h1 class="main-title">문서 AI 모델 데모</h1>', unsafe_allow_html=True)
+st.markdown('<h1 class="main-title">문서 메타데이터 테스트 페이지</h1>', unsafe_allow_html=True)
 st.markdown(
     f'<p class="subtitle">{escape(EMBED_SHORT)}, {escape(RERANKER_SHORT)}, '
-    f'{escape(LLM_SHORT)} · 문서 {len(DOCUMENTS)}종 · 7개 언어</p>',
+    f'{escape(LLM_SHORT)} · Conti Jabber 로그 · 코퍼스 {len(DOCUMENTS)}벌'
+    f'{" (" + escape(CORPUS_LANGS) + ")" if CORPUS_LANGS else ""}</p>',
     unsafe_allow_html=True,
 )
 
@@ -1227,10 +1381,12 @@ with tab_demo:
         doc_key = DOCUMENT_OPTIONS[selected_document]
         doc_arg = None if doc_key == ALL_DOCS else doc_key
 
-        # 5단계용 실제 정답. 직접 입력한 질문은 정답표에 없으므로 못 찾고,
-        # 그러면 gold 가 비어 5단계를 건너뛴다.
+        # 5단계용 정답. 지금 정답표는 모범 답안이 아니라 정답 청크 번호를
+        # 들고 있어서, 최종 선정 청크에 그 번호가 들었는지로 채점한다.
+        # 직접 입력한 질문은 정답표에 없으므로 못 찾고 5단계를 건너뛴다.
         found = find_question(question)
         gold = list(found.keywords) if found else []
+        gold_chunks = list(found.answer_chunks) if found else []
 
         # 이미 돌려 본 조합이면 GPU 를 다시 태우지 않는다. 같은 질문을 반복해
         # 보여주는 시연에서 매번 답변 생성을 다시 도는 것을 막는다.
@@ -1275,6 +1431,7 @@ with tab_demo:
                 )
 
             elif stage == "rerank":
+                stage0["selected"] = payload.selected
                 render_rerank(payload)           # 2번
                 render_selected(payload)         # 3번
                 progress.info(
@@ -1291,7 +1448,8 @@ with tab_demo:
 
             elif stage == "grade":
                 progress.empty()
-                render_grade(payload)            # 5번
+                # 채점 카드에 '최종 청크' 줄을 그리려면 3번 결과가 필요하다.
+                render_grade(payload, stage0.get("selected"))   # 5번
 
         if cache_key in cache:
             # 캐시 히트. 단계별로 그려 줄 콜백이 안 불리므로 한꺼번에 그린다.
@@ -1303,7 +1461,7 @@ with tab_demo:
                     f"다시 계산하려면 페이지를 새로 고칩니다.")
         else:
             result = run_pipeline(question, doc=doc_arg, gold=gold,
-                                  on_stage=on_stage)
+                                  gold_chunks=gold_chunks, on_stage=on_stage)
             note = ""
             # 실패한 결과는 캐시하지 않는다. 일시적인 OOM 이나 파싱 실패가
             # 캐시에 박히면 다시 눌러도 계속 그 결과만 나온다.
@@ -1313,8 +1471,8 @@ with tab_demo:
         # 질문을 바꾸거나 입력칸에 타자를 치면 스크립트가 처음부터 다시 도는데,
         # 결과 카드는 이 블록 안에서만 그려지므로 그때 화면에서 사라진다.
         # 마지막 결과를 남겨 두었다가 아래 elif 에서 되살린다.
-        st.session_state["last_run"] = (result, gold)
-        render_tail(result, gold, note)
+        st.session_state["last_run"] = (result, gold or gold_chunks)
+        render_tail(result, gold or gold_chunks, note)
 
     elif st.session_state.get("last_run"):
         # 검색을 누른 게 아니라 위젯을 건드려 다시 그려진 경우. 직전 결과를

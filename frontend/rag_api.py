@@ -29,10 +29,12 @@ import time
 from dataclasses import dataclass, field
 
 # 계약 버전. backend/src/schema.py 와 같아야 한다.
-SCHEMA_VERSION = 1
+# 2 = 0단계(조건 추출 · 후보 좁히기)가 들어간 판. 서버가 1을 돌려주면 GPU 쪽이
+# 옛 배포라는 뜻이고, 그때는 문서 목록도 질문 세트도 옛것이 온다.
+SCHEMA_VERSION = 2
 
 # GPU 서버
-API_BASE = os.getenv("RAG_API_BASE", "http://147.46.15.89:58566").rstrip("/")
+API_BASE = os.getenv("RAG_API_BASE", "http://147.46.15.89:58567").rstrip("/")
 SEARCH_PATH = os.getenv("RAG_SEARCH_PATH", "/rag/search")
 META_PATH = os.getenv("RAG_META_PATH", "/rag/meta")
 API_KEY = os.getenv("RAG_API_KEY", "").strip()
@@ -83,6 +85,8 @@ class Question:
     question: str
     answer: str = ""
     keywords: tuple[str, ...] = ()
+    # 정답 청크 번호. 5단계는 최종 선정 청크에 이 중 하나가 들었는지로 본다.
+    answer_chunks: tuple[int, ...] = ()
 
     @property
     def label(self) -> str:
@@ -116,8 +120,11 @@ class Hit:
 class MetaQuery:
     """0단계가 뽑은 조건. 사람·기간·키워드뿐이다 (방향은 두지 않는다)."""
 
-    people: list[str] = field(default_factory=list)
-    unknown: list[str] = field(default_factory=list)   # 명부에 없어 버린 이름
+    people: list[str] = field(default_factory=list)     # 아래 셋을 합친 것
+    sender: list[str] = field(default_factory=list)
+    receiver: list[str] = field(default_factory=list)
+    participants: list[str] = field(default_factory=list)
+    unknown: list[str] = field(default_factory=list)    # 명부에 없어 버린 이름
     since: str | None = None
     until: str | None = None
     keywords: list[str] = field(default_factory=list)
@@ -289,6 +296,7 @@ class GradeResult:
     verdict: str = ""
     reason: str = ""
     gold_answer: str = ""
+    method: str = "문자열 포함"   # 무엇으로 판정했는지 (화면 표시용)
     elapsed: float = 0.0
     error: str | None = None
 
@@ -367,7 +375,10 @@ def _hit(d: dict) -> Hit:
 def _query(d: dict | None) -> MetaQuery:
     d = d or {}
     return MetaQuery(
-        people=list(d.get("people", [])), unknown=list(d.get("unknown", [])),
+        people=list(d.get("people", [])), sender=list(d.get("sender", [])),
+        receiver=list(d.get("receiver", [])),
+        participants=list(d.get("participants", [])),
+        unknown=list(d.get("unknown", [])),
         since=d.get("since"), until=d.get("until"),
         keywords=list(d.get("keywords", [])),
     )
@@ -459,7 +470,8 @@ def _grade(d: dict | None) -> GradeResult | None:
         question=d["question"], llm_answer=d["llm_answer"],
         candidates=list(d["candidates"]), matched=list(d["matched"]),
         verdict=d["verdict"], reason=d["reason"],
-        gold_answer=d["gold_answer"], elapsed=float(d["elapsed"]),
+        gold_answer=d["gold_answer"], method=d.get("method", "문자열 포함"),
+        elapsed=float(d["elapsed"]),
         error=d["error"],
     )
 
@@ -543,8 +555,9 @@ def schema_mismatch() -> str | None:
     got = (meta() or {}).get("schema_version")
     if got is None or got == SCHEMA_VERSION:
         return None
-    return (f"GPU 서버의 응답 형식이 다릅니다 (서버 v{got}, 화면 v"
-            f"{SCHEMA_VERSION}). 한쪽만 배포된 상태일 수 있습니다.")
+    return (f"GPU 서버가 옛 판본입니다 (서버 v{got}, 화면 v{SCHEMA_VERSION}). "
+            f"문서 목록·질문 세트도 그 서버가 들고 있는 옛것이 그대로 옵니다. "
+            f"{API_BASE} 에서 지금 backend/ 로 서버를 다시 띄우세요.")
 
 
 def documents() -> list[Document]:
@@ -568,6 +581,7 @@ def load_questions() -> list[Question]:
             id=int(q["id"]), doc=q.get("doc", ""), question=q["question"],
             answer=q.get("answer", ""),
             keywords=tuple(q.get("keywords") or []),
+            answer_chunks=tuple(int(c) for c in (q.get("answer_chunks") or [])),
         )
         for q in (meta().get("questions") or [])
     ]
@@ -653,6 +667,7 @@ def run_pipeline(question: str, doc: str | None = None,
                  top_k: int | None = None,
                  final_n: int | None = None,
                  gold: list[str] | None = None,
+                 gold_chunks: list[int] | None = None,
                  answer_language: str | None = None,
                  on_stage=None,
                  meta_mode: str | None = None) -> PipelineResult:
@@ -676,6 +691,7 @@ def run_pipeline(question: str, doc: str | None = None,
         "question": question,
         "doc": doc,
         "gold": list(gold) if gold else None,
+        "gold_chunks": [int(c) for c in gold_chunks] if gold_chunks else None,
         "answer_language": answer_language,
         "stream": on_stage is not None,
     }
