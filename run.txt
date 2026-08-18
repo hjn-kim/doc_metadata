@@ -1,7 +1,7 @@
 # 서버가 둘로 나뉘었다.
 #
 #   GPU 서버 (147.46.15.89:58566)   backend/   모델 + 색인 + 파이프라인
-#   CPU 서버                        frontend/  화면만. app.py + rag_api.py
+#   CPU 서버                        frontend/  화면만. 2-3_doc_metadata.py + rag_api.py
 #
 # CPU 가 검색을 누르면 /rag/search 로 넘기고, GPU 가 단계마다 결과를 흘려보낸다.
 
@@ -29,7 +29,10 @@ uvicorn server:app \
 #   curl http://147.46.15.89:58566/rag/meta
 #   curl -X POST http://147.46.15.89:58566/rag/search \
 #        -H 'Content-Type: application/json' \
-#        -d '{"question":"대마재배자는 누구에게 허가를 받나요?"}'
+#        -d '{"question":"ali와 defender의 대화속에 있는 rdpscanDll에 대한 증거를 찾아주세요."}'
+#
+#   응답 meta 에 0단계 결과가 들어 있다 (조건 · 키워드 · 채널별 후보 수).
+#   조건 추출을 끄고 비교하려면 "meta":"off", 규칙만 쓰려면 "meta":"rule".
 
 
 # =========================================================================
@@ -38,7 +41,7 @@ uvicorn server:app \
 # 필요한 것은 streamlit 과 requests 뿐이다 (torch·numpy 없음).
 export RAG_API_BASE=http://147.46.15.89:58566
 
-streamlit run frontend/app.py \
+streamlit run frontend/2-3_doc_metadata.py \
   --server.address 0.0.0.0 \
   --server.port 8501
 
@@ -54,6 +57,9 @@ streamlit run frontend/app.py \
 #   RAG_WARMUP=0      기동 시 예열 생략 (첫 검색이 3~4분 걸린다)
 #   RAG_CORS          허용 오리진, 쉼표 구분 (기본 *)
 #   LOCAL_LLM_MODEL   답변 생성 모델 (기본 Qwen/Qwen3-4B)
+#   RAG_EXTRACT       0단계 조건 추출 (기본 llm = 4B + 규칙 보완)
+#                     rule 이면 정규식만 써서 모델을 안 올린다 (CPU 장비)
+#                     off  면 0단계를 건너뛰고 전체를 뒤진다 (비교용)
 #
 # CPU 쪽
 #   RAG_API_BASE      GPU 서버 주소 (기본 http://147.46.15.89:58566)

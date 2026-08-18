@@ -52,7 +52,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 ROOT = Path(__file__).resolve().parent.parent
-QA_PATH = ROOT / "data" / "qa.json"
+
+# 질문-정답 세트. 예전에는 data/qa.json 하나였고 지금은 data/qa/ 밑에 있다.
+# 둘 다 찾아 본다 — 파일을 못 찾으면 앱의 질문 목록이 조용히 비어 버린다.
+QA_CANDIDATES = (ROOT / "data" / "qa" / "qa.json", ROOT / "data" / "qa.json")
+QA_PATH = next((p for p in QA_CANDIDATES if p.is_file()), QA_CANDIDATES[0])
 
 
 @dataclass
@@ -123,21 +127,34 @@ def load_questions() -> tuple[Question, ...]:
     except (OSError, json.JSONDecodeError):
         return ()
 
+    # 판본에 따라 키가 다르다. 옛 법률 세트는 questions, 지금 Jabber 세트는
+    # qa_pairs 다. 둘 다 받는다.
+    rows = data.get("qa_pairs") or data.get("questions") or []
+
     items: list[Question] = []
-    for i, row in enumerate(data.get("questions") or [], 1):
+    for i, row in enumerate(rows, 1):
         if not isinstance(row, dict) or not row.get("question"):
             continue
         words = row.get("keywords") or []
         if isinstance(words, str):
             words = [words]
         items.append(Question(
-            id=int(row.get("id") or i),
+            # id 가 'jabber-007' 처럼 문자열일 수 있다. 숫자만 뽑아 쓰고,
+            # 숫자가 없으면 순번을 준다 (앱이 번호로 질문을 되찾는다).
+            id=_question_id(row.get("id"), i),
             doc=str(row.get("doc") or ""),
             question=str(row["question"]).strip(),
             answer=str(row.get("answer") or "").strip(),
             keywords=[str(w).strip() for w in words if str(w).strip()],
         ))
     return tuple(items)
+
+
+def _question_id(value, fallback: int) -> int:
+    if isinstance(value, int):
+        return value
+    digits = re.findall(r"\d+", str(value or ""))
+    return int(digits[-1]) if digits else fallback
 
 
 def questions_for(doc: str | None = None) -> list[Question]:
