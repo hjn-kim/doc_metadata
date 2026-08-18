@@ -83,11 +83,11 @@ DEFAULT_EMB_MODEL = "bgem3"
 # 코퍼스 키 -> (화면에 쓸 제목, 언어 코드, 언어 이름, 한 줄 설명)
 DOC_TITLES: dict[str, tuple[str, str, str, str]] = {
     "jabber_ru": (
-        "Conti Jabber 로그 · 원문", "ru", "러시아어",
+        "Conti ransom 원문", "ru", "러시아어",
         "2020-06-21~11-16 · dyad + 1시간 gap 세션",
     ),
     "jabber_en": (
-        "Conti Jabber 로그 · 영문", "en", "영어",
+        "Conti ransom 영문", "en", "영어",
         "같은 대화의 영어 번역 · 청크 경계 동일",
     ),
 }

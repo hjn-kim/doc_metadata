@@ -158,6 +158,18 @@ def _kv_block(values: dict, title: str, hints: bool = False) -> str:
             f'{lines}</div>')
 
 
+def _same_condition(model_out: dict, used: dict) -> bool:
+    """두 조건이 사실상 같은가. 날짜를 편 것(2020-05 -> 2020-05-01)은 같게 본다."""
+    for key, _ in META_FIELDS:
+        mine, theirs = model_out.get(key, ""), used.get(key, "")
+        if mine == theirs:
+            continue
+        if key in ("since", "until") and mine and theirs.startswith(mine):
+            continue
+        return False
+    return True
+
+
 def render_meta(ex, fr, nr=None) -> None:
     """
     0. 조건 추출 + 후보 좁히기 — LLM 이 뱉은 JSON 을 그대로 네 줄로 보여 준다.
@@ -186,10 +198,16 @@ def render_meta(ex, fr, nr=None) -> None:
         model_out = _kv_map(ex.raw)
         title = "규칙이 뽑은 값 (4B 를 못 썼습니다)"
 
-    blocks = _kv_block(model_out, title, hints=True)
     # 명부에 없는 이름을 버렸거나, 빈 칸을 규칙이 메웠으면 두 값이 갈린다.
     # 그때만 두 번째 블록을 붙인다 (같으면 같은 줄을 두 번 읽힐 뿐이다).
-    if ex.source != "off" and used != model_out:
+    #
+    # 날짜 표기 차이는 갈린 것으로 세지 않는다. 4B 가 '2020-05' 로 적고 필터가
+    # '2020-05-01' 로 편 것뿐인데 블록을 두 벌 그리면, 읽는 사람은 모델이
+    # 틀려서 고쳐진 줄로 오해한다. 그 경우에는 편 값 한 벌만 보여 준다
+    # (모델이 적어 보낸 글자 그대로는 카드 밑 '원본 JSON' 에 남아 있다).
+    changed = not _same_condition(model_out, used)
+    blocks = _kv_block(model_out if changed else used, title, hints=True)
+    if ex.source != "off" and changed:
         blocks += _kv_block(used, "실제로 검색에 쓴 조건")
 
     dropped = ""
@@ -1354,7 +1372,7 @@ with tab_demo:
             )
             question = st.text_input(
                 label="직접 질문",
-                placeholder="예: 대마재배자는 누구에게 허가를 받나요?",
+                placeholder="2020-08-20 부터 2020-08-22 사이에 rdpscanDll에 대한 증거를 찾아주세요",
                 label_visibility="collapsed",
             ).strip()
         else:

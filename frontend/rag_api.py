@@ -73,7 +73,7 @@ class Document:
 
     @property
     def label(self) -> str:
-        return f"{self.title} · {self.lang_name}"
+        return f"{self.title}"
 
 
 @dataclass(frozen=True)
