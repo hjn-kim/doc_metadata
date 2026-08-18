@@ -672,7 +672,7 @@ def render_dataset_tab() -> None:
         st.markdown(
             f"""
             <div class="result-card">
-                <div class="dtitle">Conti Jabber 로그 · 코퍼스 {len(rows)}벌</div>
+                <div class="dtitle">Conti Jabber 로그</div>
                 <div class="ddesc">Conti 랜섬웨어 조직의 Jabber 1:1 대화 로그입니다
                     (2020-06-21 ~ 11-16 · 106,566행 · 닉네임 289명 · 대화쌍 1,114개).
                     같은 대화가 러시아어 원문과 영어 번역 두 벌로 들어 있고, 청크 경계를
@@ -997,7 +997,6 @@ st.markdown(
         .kv-head {
             font-size: 0.86rem;
             color: #475467;
-            font-weight: 700;
             margin-bottom: 0.25rem;
         }
         .kv-line {
@@ -1010,18 +1009,19 @@ st.markdown(
         }
         /* 키와 값의 농도를 같이 간다. 한쪽만 연하면 읽는 사람이 그 줄을
            덜 중요한 것으로 읽는데, 여기서는 못 뽑은 칸도 뽑은 칸만큼
-           중요하다 (비어 있다는 사실이 곧 정보다). */
+           중요하다 (비어 있다는 사실이 곧 정보다). 굵기는 주지 않는다 —
+           여섯 줄이 전부 굵으면 강조가 아니라 그냥 읽기 힘든 덩어리가 된다. */
         .kv-key {
             min-width: 7rem;
             color: #1D2939;
-            font-weight: 700;
+            font-weight: 400;
         }
         .kv-val {
             color: #1D2939;
-            font-weight: 700;
+            font-weight: 400;
             overflow-wrap: anywhere;
         }
-        .kv-val.kv-empty { color: #1D2939; font-weight: 700; }
+        .kv-val.kv-empty { color: #1D2939; font-weight: 400; }
         /* 칸 뜻풀이. 자리가 모자라면 잘린다 (값이 먼저다) */
         .kv-hint {
             flex: 1;
@@ -1281,7 +1281,6 @@ st.markdown(
 st.markdown('<h1 class="main-title">문서 메타데이터 테스트 페이지</h1>', unsafe_allow_html=True)
 st.markdown(
     f'<p class="subtitle">{escape(EMBED_SHORT)}, {escape(RERANKER_SHORT)}, '
-    f'{escape(LLM_SHORT)} · Conti Jabber 로그 · 코퍼스 {len(DOCUMENTS)}벌'
     f'{" (" + escape(CORPUS_LANGS) + ")" if CORPUS_LANGS else ""}</p>',
     unsafe_allow_html=True,
 )
