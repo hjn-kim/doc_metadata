@@ -1,0 +1,179 @@
+{
+  "source": "jabberchat2020.csv",
+  "corpora": [
+    {
+      "tag": "jabber_ru",
+      "corpus": "ru",
+      "embedding_file": "jabber_ru_embeddings.npz",
+      "chunks": "data/chunks/jabber_ru.jsonl",
+      "desc": "러시아어 중심 원본 대화"
+    },
+    {
+      "tag": "jabber_en",
+      "corpus": "en",
+      "embedding_file": "jabber_en_embeddings.npz",
+      "chunks": "data/chunks/jabber_en.jsonl",
+      "desc": "같은 대화의 영어 번역"
+    }
+  ],
+  "chunking": {
+    "model": "BAAI/bge-m3",
+    "dim": 1024,
+    "chunk_size": 512,
+    "overlap": 128,
+    "n_chunks": 15522,
+    "unit": "dyad + 1시간 gap 세션",
+    "split_basis": "en"
+  },
+  "question_language": "ko",
+  "qa_pairs": [
+    {
+      "id": "jabber-001",
+      "q_type": 1,
+      "q_type_name": "날짜 + 키워드",
+      "question": "2020-08-20 부터 2020-08-22 사이에 rdpscanDll에 대한 증거를 찾아주세요.",
+      "answer_chunk_indices": [
+        93,
+        94
+      ]
+    },
+    {
+      "id": "jabber-002",
+      "q_type": 1,
+      "q_type_name": "날짜 + 키워드",
+      "question": "2020-07 부터 2020-08 사이에 HydraCrypt에 대한 증거를 찾아주세요.",
+      "answer_chunk_indices": [
+        1439
+      ]
+    },
+        {
+      "id": "jabber-003",
+      "q_type": 1,
+      "q_type_name": "날짜 + 키워드",
+      "question": "2020-05 부터 2020-12 사이에 NetWalker에 대한 증거를 찾아주세요.",
+      "answer_chunk_indices": [
+        13043,
+        13044
+      ]
+    },
+    {
+      "id": "jabber-004",
+      "q_type": 1,
+      "q_type_name": "날짜 + 키워드",
+      "question": "2020-06 이후에 있는 stealer에 대한 증거를 찾아주세요.",
+      "answer_chunk_indices": [
+        3269
+      ]
+    },
+    {
+      "id": "jabber-005",
+      "q_type": 1,
+      "q_type_name": "날짜 + 키워드",
+      "question": "2020-10 이전에 Wermgr에 대한 증거를 찾아주세요.",
+      "answer_chunk_indices": [
+        1720,
+        1721,
+        1722,
+        2893,
+        2894
+      ]
+    },
+    {
+      "id": "jabber-006",
+      "q_type": 2,
+      "q_type_name": "화자 + 키워드",
+      "question": "ali가 말한 module에 대한 500 bots에 대한 증거를 찾아주세요.",
+      "answer_chunk_indices": [
+        100
+      ]
+    },
+    {
+      "id": "jabber-007",
+      "q_type": 2,
+      "q_type_name": "화자 + 키워드",
+      "question": "bentley가 말한 Tor ransom에 대한 증거를 찾아주세요.",
+      "answer_chunk_indices": [
+        1465
+      ]
+    },
+    {
+      "id": "jabber-008",
+      "q_type": 2,
+      "q_type_name": "화자 + 키워드",
+      "question": "professor가 말한 ransom SaaS에 대한 증거를 찾아주세요.",
+      "answer_chunk_indices": [
+        13043
+      ]
+    },
+    {
+      "id": "jabber-009",
+      "q_type": 2,
+      "q_type_name": "화자 + 키워드",
+      "question": "ponetre가 말한 SMTP spam에 대한 증거를 찾아주세요.",
+      "answer_chunk_indices": [
+        3269
+      ]
+    },
+    {
+      "id": "jabber-010",
+      "q_type": 2,
+      "q_type_name": "화자 + 키워드",
+      "question": "axel이 말한 virus VPS에 대한 증거를 찾아주세요.",
+      "answer_chunk_indices": [
+        286
+      ]
+    },
+    {
+      "id": "jabber-011",
+      "q_type": 3,
+      "q_type_name": "대화쌍 + 키워드",
+      "question": "ali와 defender의 대화속에 있는 rdpscanDll에 대한 증거를 찾아주세요.",
+      "answer_chunk_indices": [
+        93,
+        94,
+        100
+      ]
+    },
+    {
+      "id": "jabber-012",
+      "q_type": 3,
+      "q_type_name": "대화쌍 + 키워드",
+      "question": "bentley와 deploy의 대화속에 있는 ransom에 대한 증거를 찾아주세요.",
+      "answer_chunk_indices": [
+        1439,
+        1465
+      ]
+    },
+    {
+      "id": "jabber-013",
+      "q_type": 3,
+      "q_type_name": "대화쌍 + 키워드",
+      "question": "professor와 reshaev의 대화속에 있는 NetWalker에 대한 증거를 찾아주세요.",
+      "answer_chunk_indices": [
+        13043,
+        13044
+      ]
+    },
+    {
+      "id": "jabber-014",
+      "q_type": 3,
+      "q_type_name": "대화쌍 + 키워드",
+      "question": "axel과 fox의 대화속에 있는 virus에 대한 증거를 찾아주세요.",
+      "answer_chunk_indices": [
+        286
+      ]
+    },
+    {
+      "id": "jabber-015",
+      "q_type": 3,
+      "q_type_name": "대화쌍 + 키워드",
+      "question": "stern과 bentley의 대화속에 있는 Bitcoin에 대한 증거를 찾아주세요.",
+      "answer_chunk_indices": [
+        3333,
+        3366,
+        3397,
+        3431
+      ]
+    }
+  ]
+}

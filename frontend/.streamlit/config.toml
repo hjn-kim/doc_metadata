@@ -1,0 +1,10 @@
+# Streamlit 테마
+#
+# 기본 primaryColor 가 빨강(#FF4B4B)이라 버튼/슬라이더/선택 항목이 전부 빨갛게 나온다.
+# 인디고로 바꾼다. base 는 지정하지 않아 사용자의 라이트/다크 설정을 따른다.
+
+[theme]
+primaryColor = "#4C6EF5"
+
+[server]
+headless = true

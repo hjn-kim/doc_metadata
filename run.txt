@@ -1,0 +1,61 @@
+# 서버가 둘로 나뉘었다.
+#
+#   GPU 서버 (147.46.15.89:58566)   backend/   모델 + 색인 + 파이프라인
+#   CPU 서버                        frontend/  화면만. app.py + rag_api.py
+#
+# CPU 가 검색을 누르면 /rag/search 로 넘기고, GPU 가 단계마다 결과를 흘려보낸다.
+
+
+# =========================================================================
+# GPU 서버
+# =========================================================================
+conda activate sns-rag
+
+# fastapi, uvicorn 이 없으면 한 번만:
+#   pip install fastapi "uvicorn[standard]"
+
+# --workers 1 은 꼭 지킨다. 워커마다 모델을 새로 올려 11GB 씩 더 먹는다.
+# 기동하면서 모델을 예열한다 (3~4분). 건너뛰려면 RAG_WARMUP=0.
+uvicorn server:app \
+  --app-dir backend/src \
+  --host 0.0.0.0 --port 58566 \
+  --workers 1
+
+# 방화벽이 있으면 포트를 연다
+#   sudo ufw allow 58566/tcp
+
+# 확인
+#   curl http://147.46.15.89:58566/health          ready 가 true 가 될 때까지 기다린다
+#   curl http://147.46.15.89:58566/rag/meta
+#   curl -X POST http://147.46.15.89:58566/rag/search \
+#        -H 'Content-Type: application/json' \
+#        -d '{"question":"대마재배자는 누구에게 허가를 받나요?"}'
+
+
+# =========================================================================
+# CPU 서버
+# =========================================================================
+# 필요한 것은 streamlit 과 requests 뿐이다 (torch·numpy 없음).
+export RAG_API_BASE=http://147.46.15.89:58566
+
+streamlit run frontend/app.py \
+  --server.address 0.0.0.0 \
+  --server.port 8501
+
+# 통신만 먼저 확인하려면 (streamlit 없이)
+#   python frontend/rag_api.py
+
+
+# =========================================================================
+# 환경변수
+# =========================================================================
+# GPU 쪽
+#   RAG_API_KEY       설정하면 X-API-Key 헤더를 요구한다 (CPU 쪽에도 같은 값)
+#   RAG_WARMUP=0      기동 시 예열 생략 (첫 검색이 3~4분 걸린다)
+#   RAG_CORS          허용 오리진, 쉼표 구분 (기본 *)
+#   LOCAL_LLM_MODEL   답변 생성 모델 (기본 Qwen/Qwen3-4B)
+#
+# CPU 쪽
+#   RAG_API_BASE      GPU 서버 주소 (기본 http://147.46.15.89:58566)
+#   RAG_API_KEY       위와 같은 값
+#   RAG_READ_TIMEOUT  응답 대기 초 (기본 600)
