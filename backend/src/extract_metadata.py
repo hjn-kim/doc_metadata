@@ -248,7 +248,15 @@ def build_system_prompt(nicks: list[str], max_nicks: int = 320) -> str:
            찾습니다.
 
   since    기간 시작 (YYYY-MM-DD). 없으면 null
-  until    기간 끝 (YYYY-MM-DD). 하루만 말하면 since 와 같게. 없으면 null
+  until    기간 끝 (YYYY-MM-DD). 없으면 null
+
+           "2020-09-29에"       -> since 2020-09-29, until 2020-09-29
+           "2020-08 부터 2020-09 사이" -> since 2020-08-01, until 2020-09-30
+           "2020-10 이전에"      -> since null,       until 2020-10-31
+           "2020-06 이후에"      -> since 2020-06-01, until null
+
+           '이전 / 까지' 는 끝만, '이후 / 부터' 는 시작만 말합니다. 한쪽만
+           말한 것을 양쪽으로 채우면 그 달 하나로 좁혀져 답을 놓칩니다.
   keywords 대화 본문에 글자 그대로 나올 문자열. IP 주소, 도메인, 파일명,
            지갑 주소, 프로그램 이름 같은 것입니다.
 
@@ -277,6 +285,9 @@ def build_system_prompt(nicks: list[str], max_nicks: int = 320) -> str:
 
   질문: 2020-09-29에 랜섬웨어 배포를 논의한 대화를 찾아주세요.
   출력: {{"sender": [], "receiver": [], "participants": [], "since": "2020-09-29", "until": "2020-09-29", "keywords": []}}
+
+  질문: 2020-10 이전에 Wermgr에 대한 증거를 찾아주세요.
+  출력: {{"sender": [], "receiver": [], "participants": [], "since": null, "until": "2020-10-31", "keywords": ["Wermgr"]}}
 
 닉네임 명부 ({len(nicks)}명):
 {roster}"""
@@ -358,9 +369,19 @@ def _merge(rule: dict, llm: dict | None, meta) -> tuple[dict, bool]:
             if rule.get(key):
                 out[key], used_rule = list(rule[key]), True
 
+    # 열린 구간("2020-10 이전")을 4B 가 닫힌 구간(그 달 하나)으로 읽는 일이
+    # 잦다. 규칙은 '이전/이후' 표지를 보고 한쪽만 채우므로, 규칙이 한쪽만
+    # 잡았는데 4B 가 양쪽을 채웠으면 규칙 쪽을 쓴다. 질문에 적힌 표지가
+    # 모델의 짐작보다 확실하다.
+    one_sided = bool(rule.get("since")) != bool(rule.get("until"))
+    llm_both = all(llm.get(k) for k in ("since", "until"))
+
     for key in ("since", "until"):
         value = llm.get(key)
-        if value and re.search(r"\d{4}[-/.]\d{1,2}", str(value)):
+        if one_sided and llm_both:
+            out[key] = rule.get(key)
+            used_rule = True
+        elif value and re.search(r"\d{4}[-/.]\d{1,2}", str(value)):
             out[key] = str(value).strip()
         else:
             out[key] = rule.get(key)

@@ -205,11 +205,17 @@ def render_meta(ex, fr, nr=None) -> None:
             return "-" if value is None else f"{value:,}"
 
         both = nr.n_both if nr.n_both is not None else nr.n_used
+        line = (f"청크 {nr.n_chunks:,} → 메타 {count(nr.n_meta)}"
+                f" ∩ 키워드 {count(nr.n_keyword)} → {count(both)}")
+        # 교집합이 비면 좁히기가 한쪽 조건을 풀고 넓힌다. 그때 마지막 숫자가
+        # 0 이면 "검색할 게 없었다" 로 읽히는데, 실제로는 푼 쪽으로 검색했다.
+        # 무엇으로 몇 개를 뒤졌는지까지 적는다.
+        if nr.n_both is not None and nr.n_both != nr.n_used:
+            line += f" → 실제 후보 {nr.n_used:,} ({escape(nr.step)})"
         funnel = (
             f'<div class="kv-line">'
             f'<span class="kv-key">필터링</span>'
-            f'<span class="kv-val">청크 {nr.n_chunks:,} → 메타 {count(nr.n_meta)}'
-            f' ∩ 키워드 {count(nr.n_keyword)} → {count(both)}</span>'
+            f'<span class="kv-val">{line}</span>'
             f'</div>'
         )
 
