@@ -207,6 +207,13 @@ def normalize(raw: dict, meta: ChunkMeta | None = None) -> MetaQuery:
     receiver, bad_r = resolved(RECEIVER_KEYS)
     participants, bad_p = resolved(PARTICIPANT_KEYS)
 
+    # 세 칸은 배타적이다. 방향을 말한 칸이 이기고, 같은 이름이 participants
+    # 에도 있으면 그쪽에서 뺀다. 추출기가 이미 정리해서 보내지만, 다른 경로
+    # (CLI --json, 옛 판본 응답)로 들어온 것도 화면에 두 번 뜨지 않게 한다.
+    receiver = [n for n in receiver if n not in sender]
+    directed = set(sender) | set(receiver)
+    participants = [n for n in participants if n not in directed]
+
     # 필터는 방향을 모른다. 셋을 합쳐 "이 사람들이 다 낀 대화" 로 건다.
     # sender 하나면 그 사람이 낀 대화, sender + receiver 면 그 둘의 대화쌍,
     # participants 두 명이면 마찬가지로 그 둘의 대화쌍이다.

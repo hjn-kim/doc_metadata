@@ -243,9 +243,14 @@ def build_system_prompt(nicks: list[str], max_nicks: int = 320) -> str:
                "A와 B의 대화", "A와 B 사이의 대화", "A와 B가 나눈 이야기"
                -> participants: ["A", "B"]      (한 명만 넣으면 틀립니다)
 
-           셋 다 아래 명부에 있는 닉네임만 넣습니다. 한 사람을 두 칸에
-           중복해서 넣지 마세요 — 어느 칸에 넣든 그 사람이 대화에 낀 것으로
-           찾습니다.
+           세 칸은 서로 배타적입니다. 한 사람은 한 칸에만 넣습니다.
+             "A가 보낸"        -> sender ["A"],  나머지 두 칸은 []
+             "A가 받은"        -> receiver ["A"], 나머지 두 칸은 []
+             "A가 B에게 보낸"  -> sender ["A"], receiver ["B"], participants []
+             "A와 B의 대화"    -> participants ["A","B"], 나머지 두 칸은 []
+           같은 이름을 두 칸에 겹쳐 적으면 틀린 출력입니다.
+
+           셋 다 아래 명부에 있는 닉네임만 넣습니다.
 
   since    기간 시작 (YYYY-MM-DD). 없으면 null
   until    기간 끝 (YYYY-MM-DD). 없으면 null
@@ -356,18 +361,28 @@ def _merge(rule: dict, llm: dict | None, meta) -> tuple[dict, bool]:
     used_rule = False
 
     # 사람은 칸별로 옮긴다. 어느 칸이든 명부에 있는 이름만 남는다.
-    got_any = False
-    for key in ("sender", "receiver", "participants"):
+    roles = {}
+    for key in ROLE_KEYS:
         names = [p for p in (meta.resolve(x) for x in _listify(llm.get(key)))
                  if p]
-        out[key] = list(dict.fromkeys(names))
-        got_any = got_any or bool(names)
+        roles[key] = list(dict.fromkeys(names))
 
-    # 4B 가 사람을 한 명도 못 뽑았는데 규칙에는 잡혔으면 규칙 쪽을 쓴다.
-    if not got_any:
-        for key in ("sender", "receiver", "participants"):
-            if rule.get(key):
-                out[key], used_rule = list(rule[key]), True
+    rule_names = {n for key in ROLE_KEYS for n in rule.get(key, [])}
+    llm_names = {n for names in roles.values() for n in names}
+
+    if not llm_names and rule_names:
+        # 4B 가 사람을 한 명도 못 뽑았다. 규칙이 잡은 것을 그대로 쓴다.
+        roles = {key: list(rule.get(key, [])) for key in ROLE_KEYS}
+        used_rule = True
+    elif rule_names and rule_names == llm_names:
+        # 같은 사람을 두고 칸만 갈렸다. 규칙 쪽을 쓴다 — 규칙은 "A와 B의 대화",
+        # "A가 B에게 보낸" 같은 표현을 보고 나눈 것이라 근거가 분명한 반면,
+        # 4B 는 같은 이름을 세 칸에 다 적어 보내는 일이 잦다.
+        if roles != {key: list(rule.get(key, [])) for key in ROLE_KEYS}:
+            roles = {key: list(rule.get(key, [])) for key in ROLE_KEYS}
+            used_rule = True
+
+    out.update(_split_roles(roles))
 
     # 열린 구간("2020-10 이전")을 4B 가 닫힌 구간(그 달 하나)으로 읽는 일이
     # 잦다. 규칙은 '이전/이후' 표지를 보고 한쪽만 채우므로, 규칙이 한쪽만
@@ -394,6 +409,32 @@ def _merge(rule: dict, llm: dict | None, meta) -> tuple[dict, bool]:
     out["keywords"] = list(dict.fromkeys(words))
 
     return out, used_rule
+
+
+# 사람 칸 세 개. 서로 배타적이다 (아래 _split_roles 참고).
+ROLE_KEYS = ("sender", "receiver", "participants")
+
+
+def _split_roles(roles: dict) -> dict:
+    """
+    세 칸을 배타적으로 정리한다.
+
+    방향을 말한 칸(sender/receiver)이 이긴다. 같은 이름이 participants 에도
+    적혀 있으면 그쪽에서 뺀다 — "A가 B에게 보낸" 을 4B 가 세 칸에 다 적어
+    보내는 일이 잦은데, 그대로 두면 화면이 "이 사람이 보내기도 하고 그냥
+    참여하기도 했다" 처럼 읽힌다.
+
+    필터 결과는 어느 쪽이든 같다 (방향을 저장하지 않으므로 셋을 합쳐 쓴다).
+    여기서 정리하는 것은 순전히 화면에 사실대로 적기 위해서다.
+    """
+    sender = list(dict.fromkeys(roles.get("sender") or []))
+    receiver = [n for n in dict.fromkeys(roles.get("receiver") or [])
+                if n not in sender]
+    directed = set(sender) | set(receiver)
+    participants = [n for n in dict.fromkeys(roles.get("participants") or [])
+                    if n not in directed]
+    return {"sender": sender, "receiver": receiver,
+            "participants": participants}
 
 
 def _listify(value) -> list[str]:
