@@ -1,18 +1,4 @@
 """
-화면 전용 데모 앱 (CPU 서버) - 계산은 GPU 서버가 한다.
-
-    [이 서버 : CPU]                          [GPU 서버]
-    frontend/2-3_doc_metadata.py --- HTTP --> backend/src/server.py
-    frontend/rag_api.py                        0 조건 추출  Qwen3-4B + 규칙
-                      <--- 단계별 ------        1 질의 임베딩 BAAI/bge-m3
-                           NDJSON               2 리랭킹     bge-reranker-v2-m3
-                                                4 답변 생성  Qwen/Qwen3-4B
-                                              + data/ (대화 로그·색인·정답표)
-
-이 서버에는 모델도 색인도 없다. 코퍼스 목록·질문 세트·모델 이름은 /rag/meta 에서
-받아 오고, 검색은 /rag/search 로 넘긴다. 필요한 패키지는 streamlit 과 requests
-뿐이다.
-
     RAG_API_BASE   GPU 서버 주소 (기본 http://147.46.15.89:58567)
     RAG_API_KEY    설정돼 있으면 X-API-Key 로 보낸다
 
@@ -23,14 +9,20 @@ import sys
 from html import escape
 from pathlib import Path
 
+import pandas as pd
 import streamlit as st
+
+from shared_utils import apply_common_styles
+
+apply_common_styles()
+
 
 # rag_api.py 는 이 파일 옆에 있다. 어느 경로에서 띄우든 찾도록 직접 넣는다
 # (streamlit 이 스크립트 폴더를 넣어 주긴 하지만, 옛 판본이 다른 폴더에 남아
 # 있으면 그쪽이 먼저 잡혀 화면만 옛것으로 도는 일이 있었다).
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from rag_api import (  # noqa: E402
+from api_2_3 import (  # noqa: E402
     ALL_DOCS,
     API_BASE,
     PipelineResult,
@@ -618,22 +610,9 @@ TYPE_EX = [
 ]
 
 
-def frame(rows: list[list], headers: list[str]) -> None:
-    """머리글 한 줄 + 행 목록을 표 하나로 그린다. 첫 칸이 항목 이름이다."""
-    head = "".join(f"<th>{escape(str(h))}</th>" for h in headers)
-    body = ""
-    for row in rows:
-        cells = "".join(
-            (f'<td class="dkey">{escape(str(cell))}</td>' if i == 0
-             else f"<td>{escape(str(cell))}</td>")
-            for i, cell in enumerate(row)
-        )
-        body += f"<tr>{cells}</tr>"
-    st.markdown(
-        f'<table class="dtable"><thead><tr>{head}</tr></thead>'
-        f"<tbody>{body}</tbody></table>",
-        unsafe_allow_html=True,
-    )
+def frame(rows, columns):
+    st.dataframe(pd.DataFrame(rows, columns=columns),
+                 hide_index=True, use_container_width=True)
 
 
 
@@ -954,35 +933,30 @@ st.markdown(
             color: #3B5BDB;
         }
 
-        /* ---- 데이터셋 탭 표 (frame) ---- */
-        .dtable {
-            width: 100%;
+        /* 질문 탭 표. 여기만 글자를 한 단계 크게 */
+        .qlist {
+            /* 표 전체를 왼쪽에서 조금 들여 쓴다 (질문 탭에서만 쓰는 표다) */
+            width: calc(100% - 1.5rem);
+            margin-left: 1.5rem;
             border-collapse: collapse;
             font-size: 1.05rem;
             line-height: 1.6;
-            margin-bottom: 0.6rem;
         }
-        .dtable th {
-            background: #F2F4F7;
-            color: #475467;
-            font-size: 0.95rem;
-            font-weight: 700;
+        .qlist th {
             text-align: left;
-            padding: 0.6rem 0.9rem;
+            font-size: 0.98rem;
+            font-weight: 700;
+            color: #475467;
+            background: #F2F4F7;
+            padding: 0.55rem 0.8rem;
             border-bottom: 1px solid #D0D5DD;
         }
-        .dtable td {
-            padding: 0.72rem 0.9rem;
+        .qlist td {
+            padding: 0.5rem 0.8rem;
             border-bottom: 1px solid #EAECF0;
-            vertical-align: top;
         }
-        .dtable tr:last-child td { border-bottom: none; }
-        .dtable td.dkey {
-            width: 190px;
-            font-weight: 700;
-            color: #344054;
-            background: #FCFCFD;
-        }
+        .qlist tr:last-child td { border-bottom: none; }
+
 
         div.stButton > button {
             height: 3rem;
@@ -1035,7 +1009,7 @@ elif schema_mismatch():
 
 (tab_demo, tab_data,
  tab_prep, tab_chunking, tab_question,tab_metadata) = st.tabs(
-    ["데모", "데이터셋", "전처리", "청킹", "질문","메타데이터"]
+    ["1. 데모", "2. 데이터셋", "3. 전처리", "4. 청킹", "5. 질문","6. 메타데이터"]
 )
 
 with tab_demo:
@@ -1343,10 +1317,26 @@ with tab_chunking:
 
 with tab_question:
     st.markdown("### 질문")
-    frame(
-    [[name, desc, direct, f"{n}문항"]
-        for name, desc, direct, n in TYPE_EX],
-    ["질의 유형", "설명", "question", "개수"],
+
+    # 유형 이름 한 줄 -> "번호. 질문" 다섯 줄 -> 빈 줄.
+    # st.dataframe 은 캔버스로 그려서 글자 크기를 못 만진다. 이 표만 조금 크게
+    # 보이도록 HTML 로 그린다 (.qlist 규칙은 위 스타일 절에 있다).
+    rows = []
+    for group, (type_name, *_) in enumerate(TYPE_EX):
+        if rows:
+            rows.append("")
+        rows.append(f"유형{group + 1} - {type_name}")
+        for offset, q in enumerate(QUESTIONS[group * 5:(group + 1) * 5]):
+            rows.append(f"{group * 5 + offset + 1}. {q.question}")
+
+    body = "".join(
+        f"<tr><td>{escape(line) if line else '&nbsp;'}</td></tr>"
+        for line in rows
+    )
+    st.markdown(
+        f'<table class="qlist"><thead><tr><th>질문</th></tr></thead>'
+        f"<tbody>{body}</tbody></table>",
+        unsafe_allow_html=True,
     )
 
 with tab_metadata:
@@ -1371,4 +1361,6 @@ with tab_metadata:
     ], ["메타데이터"])
 
     st.markdown("### 키워드")
-    st.markdown("해당 키워드가 존재하는 청크들 + 앞뒤 N개로 범위 좁히기")
+    st.markdown("present: 키워드가 존재하는 청크")
+    st.markdown("plan 1: LLM이 키워드의 유사어 N개 생성하여 유사어 존재 청크 포함")
+    st.markdown("plan 2: 키워드가 존재하는 청크 앞뒤 N개")
