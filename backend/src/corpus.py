@@ -168,17 +168,17 @@ class DocSpec:
 # 문서이고, 그 사실을 여기 적어 두면 필터가 알아서 비켜 간다.
 DOC_SPECS: dict[str, DocSpec] = {
     "jabber_ru": DocSpec(
-        "Conti ransom 원문", "ru", "러시아어",
+        "ru_Contiransom", "ru", "러시아어",
         "2020-06-21~11-16 · dyad + 1시간 gap 세션",
         meta_key="jabber",
     ),
     "jabber_en": DocSpec(
-        "Conti ransom 영문", "en", "영어",
+        "en_Contiransom ", "en", "영어",
         "같은 대화의 영어 번역 · 청크 경계 동일",
         meta_key="jabber",
     ),
     "ko_voice": DocSpec(
-        "보이스피싱 통화록", "ko", "한국어",
+        "ko_보이스피싱통화록", "ko", "한국어",
         "통화 70건 · 통화 1건 = 청크 1개 (긴 통화만 발화 경계 분할)",
         meta_key="ko_voice",
         has_time=False,                     # 원문에 시각이 없다
