@@ -1,12 +1,30 @@
 # -*- coding: utf-8 -*-
-"""sessions.jsonl -> chunk_meta.npz (+ nicks.json)
+"""청크 .jsonl -> data/meta/{메타키}.npz (+ _nicks.json)
 
-메타데이터 필터가 읽을 청크별 메타데이터를 한 벌로 굳힌다. 검색 때 다시
-계산하지 않도록 numpy 배열로 떨어뜨리는 것이 목적이다.
+메타데이터 필터가 읽을 청크별 메타데이터를 굳힌다. 검색 때 다시 계산하지
+않도록 numpy 배열로 떨어뜨리는 것이 목적이다.
 
-    chunk_meta.npz    청크 N개의 대화쌍(dyad)과 시각 (언어 공통)
-    chunk_meta.jsonl  같은 내용을 사람이 읽는 형태로 (검수용)
-    nicks.json        닉네임 명부. 2단계 추출기의 화이트리스트
+**문서마다 한 벌씩 만든다.** 예전에는 문서가 jabber 하나뿐이라 chunk_meta.npz
+한 개면 됐지만, 문서가 늘면 그 한 개가 조용히 틀린 답을 준다. 파일은 청크
+번호(0..N-1)로만 찾으므로, ko_voice 5번 청크가 jabber 5번 청크의 메타데이터를
+그대로 물려받아 버리기 때문이다.
+
+    data/meta/jabber.npz          Conti Jabber 로그 (ru/en 공용)
+    data/meta/jabber.jsonl        같은 내용을 사람이 읽는 형태로 (검수용)
+    data/meta/jabber_nicks.json   닉네임 명부. 2단계 추출기의 화이트리스트
+    data/meta/ko_voice.npz        보이스피싱 통화록
+    data/meta/ko_voice.jsonl
+
+'문서키' 가 아니라 '메타키' 로 나누는 이유는 jabber_ru 와 jabber_en 때문이다.
+둘은 같은 대화를 번역만 한 것이라 청크 번호가 완전히 일치한다. 메타데이터
+한 벌이 두 언어에 그대로 들어맞으므로 문서별로 쪼개면 똑같은 파일이 두 벌
+생긴다. corpus.py 의 DOC_SPECS 에서 두 문서가 같은 meta_key 를 가리킨다.
+
+시각이 없는 문서도 있다:
+
+    ko_voice 는 원문에 통화 시각이 적혀 있지 않아 ts 가 전부 null 이다.
+    그런 문서는 ts 자리에 NO_TS 를 적고 info["has_time"] 을 false 로 둔다.
+    기간 조건은 애초에 이 문서에 걸리지 않는다 (corpus.py DOC_SPECS 참고).
 
 담는 것은 dyad 와 ts 둘뿐이다:
 
@@ -63,14 +81,43 @@ import numpy as np
 import pandas as pd
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_SESSIONS = os.path.join(ROOT, "data", "chunks", "sessions.jsonl")
-DEFAULT_OUT = os.path.join(ROOT, "data", "chunks", "chunk_meta.npz")
-DEFAULT_JSONL = os.path.join(ROOT, "data", "chunks", "chunk_meta.jsonl")
-DEFAULT_NICKS = os.path.join(ROOT, "data", "chunks", "nicks.json")
+CHUNKS_DIR = os.path.join(ROOT, "data", "chunks")
+META_DIR = os.path.join(ROOT, "data", "meta")
 
 # preprocess 가 dyad 를 만든 규칙. 여기서도 똑같이 맞춰야 필터가 문자열로
 # 비교했을 때 어긋나지 않는다.
 DYAD_SEP = " | "
+
+# 시각이 없는 청크에 적어 두는 값. epoch 로는 있을 수 없는 수라 덤프를 눈으로
+# 봐도 "시각 없음" 이 바로 보이고, 기간 마스크에 넣으면 반드시 False 가 된다
+# (ts_end >= since 가 성립할 수 없다). 0 이나 -1 을 쓰면 1970년으로 읽혀서
+# "1969년 이후" 같은 질문에 조용히 걸린다.
+NO_TS = int(np.iinfo(np.int64).min)
+
+# 메타키 -> 무엇을 읽어 무엇을 만들지.
+#
+#     input     청크 메타데이터가 들어 있는 .jsonl
+#     has_time  ts_start/ts_end 가 있는가
+#     nicks     명부(_nicks.json)를 만들 것인가
+#     docs      이 메타데이터를 함께 쓰는 문서들 (임베딩 행 수 검증에 쓴다)
+#
+# jabber 의 입력이 sessions.jsonl 인 이유는 본문이 없는 메타데이터 전용 파일이라
+# 두 언어 어느 쪽에도 치우치지 않기 때문이다. 다른 문서는 그런 중간 파일 없이
+# 자기 청크 .jsonl 이 메타데이터를 이미 들고 있다.
+SOURCES: dict[str, dict] = {
+    "jabber": {
+        "input": os.path.join(CHUNKS_DIR, "sessions.jsonl"),
+        "has_time": True,
+        "nicks": True,
+        "docs": ("jabber_ru", "jabber_en"),
+    },
+    "ko_voice": {
+        "input": os.path.join(CHUNKS_DIR, "ko_voice.jsonl"),
+        "has_time": False,
+        "nicks": False,
+        "docs": ("ko_voice",),
+    },
+}
 
 
 # --------------------------------------------------------------------------
@@ -131,8 +178,14 @@ def dyads_of(session: dict) -> list[tuple[str, str]]:
     return sorted(pairs)
 
 
-def chunk_meta(session: dict) -> dict:
-    """세션 한 줄 -> 필터가 쓸 메타데이터 한 줄."""
+def chunk_meta(session: dict, has_time: bool = True) -> dict:
+    """
+    세션 한 줄 -> 필터가 쓸 메타데이터 한 줄.
+
+    has_time 이 False 면 ts 를 아예 읽지 않는다. 원문에 시각이 없는 문서에서
+    억지로 값을 지어내면(예: 파일 순서를 시각으로) 기간 필터가 그럴듯하게
+    틀린 답을 낸다. 없는 것은 없다고 적는 편이 낫다.
+    """
     pairs = dyads_of(session)
     if not pairs:
         raise ValueError(f"청크 {session['chunk_index']}: 참여자가 없습니다.")
@@ -141,8 +194,10 @@ def chunk_meta(session: dict) -> dict:
         "chunk_index": int(session["chunk_index"]),
         "session_id": int(session["session_id"]),
         "dyads": [DYAD_SEP.join(p) for p in pairs],
-        "ts_start": trim_seconds(session["ts_start"]),
-        "ts_end": trim_seconds(session["ts_end"]),
+        "ts_start": (trim_seconds(session["ts_start"])
+                     if has_time and session.get("ts_start") else None),
+        "ts_end": (trim_seconds(session["ts_end"])
+                   if has_time and session.get("ts_end") else None),
         "n_messages": int(session["n_messages"]),
         "n_tokens": int(session.get("n_tokens", 0)),
         "part": int(session.get("part", 1)),
@@ -152,16 +207,16 @@ def chunk_meta(session: dict) -> dict:
     }
 
 
-def build(sessions_path: str) -> tuple[list[dict], dict]:
+def build(sessions_path: str, has_time: bool = True) -> tuple[list[dict], dict]:
     sessions = load_sessions(sessions_path)
-    rows = [chunk_meta(s) for s in sessions]
+    rows = [chunk_meta(s, has_time) for s in sessions]
 
     n_dyad = Counter(len(r["_pairs"]) for r in rows)
     n_self = sum(1 for r in rows if any(a == b for a, b in r["_pairs"]))
     nicks = {n for r in rows for p in r["_pairs"] for n in p}
     stat = {
         "청크": len(rows),
-        "닉네임": len(nicks),
+        "이름": len(nicks),
         "dyad 1개 (1:1)": n_dyad.get(1, 0),
         "dyad 여러 개 (공지)": sum(v for k, v in n_dyad.items() if k > 1),
         "dyad 총 개수": sum(len(r["_pairs"]) for r in rows),
@@ -174,10 +229,21 @@ def build(sessions_path: str) -> tuple[list[dict], dict]:
 # --------------------------------------------------------------------------
 # 저장 — 검색 때 numpy 로 바로 마스킹할 수 있는 형태
 # --------------------------------------------------------------------------
-def to_epoch(values: list[str]) -> np.ndarray:
-    """ISO 문자열 -> epoch 초(int64). 시간 비교를 정수 연산으로 만든다."""
+def to_epoch(values: list[str | None]) -> np.ndarray:
+    """
+    ISO 문자열 -> epoch 초(int64). 시간 비교를 정수 연산으로 만든다.
+
+    None 은 NO_TS 로 간다. 시각이 없는 문서는 전부 None 이라 배열이 통째로
+    NO_TS 가 되고, 그러면 기간 마스크가 그 문서에서 아무것도 고르지 못한다 —
+    "모르는 것은 걸리지 않는다" 가 "모르는 것은 다 걸린다" 보다 안전하다.
+    """
+    if all(v is None for v in values):
+        return np.full(len(values), NO_TS, dtype=np.int64)
+
     ts = pd.to_datetime(pd.Series(values)).dt.floor("s")
-    return (ts.astype("int64") // 1_000_000_000).to_numpy(dtype=np.int64)
+    out = (ts.astype("int64") // 1_000_000_000).to_numpy(dtype=np.int64)
+    out[pd.isna(ts).to_numpy()] = NO_TS
+    return out
 
 
 def to_indptr(lists: list[list]) -> np.ndarray:
@@ -187,7 +253,8 @@ def to_indptr(lists: list[list]) -> np.ndarray:
     return indptr
 
 
-def save_npz(rows: list[dict], out_path: str, sessions_path: str) -> dict:
+def save_npz(rows: list[dict], out_path: str, src_path: str,
+             meta_key: str, has_time: bool, docs: tuple[str, ...]) -> dict:
     """
     저장하는 것은 dyad 쌍 CSR 과 시각뿐이다.
 
@@ -213,14 +280,18 @@ def save_npz(rows: list[dict], out_path: str, sessions_path: str) -> dict:
                          count=len(flat))
 
     info = {
-        "sessions": os.path.basename(sessions_path),
+        "meta_key": meta_key,
+        "docs": list(docs),
+        "sessions": os.path.basename(src_path),
         "n_chunks": len(rows),
         "n_nicks": len(nicks),
         "n_dyads": len(flat),
+        "has_time": bool(has_time),
         "model": "청크 = 무순 쌍(dyad)의 묶음. participant(A) 는 "
                  "dyad 한쪽이 A 인 것. 방향(sender/receiver)은 두지 않는다",
-        "ts_unit": "epoch seconds (naive = UTC 로 고정. 원본 로그 시각 그대로)",
-        "note": "chunk_index 는 jabber_ru/jabber_en 양쪽 .npz 의 행 번호와 같다",
+        "ts_unit": ("epoch seconds (naive = UTC 로 고정. 원본 로그 시각 그대로)"
+                    if has_time else f"없음 (ts 는 전부 NO_TS={NO_TS})"),
+        "note": f"chunk_index 는 {' / '.join(docs)} 임베딩 .npz 의 행 번호와 같다",
     }
 
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
@@ -287,7 +358,8 @@ def save_jsonl(rows: list[dict], path: str) -> None:
 # --------------------------------------------------------------------------
 # 검증
 # --------------------------------------------------------------------------
-def check(rows: list[dict], sessions_path: str) -> list[str]:
+def check(rows: list[dict], sessions_path: str,
+          docs: tuple[str, ...] = ()) -> list[str]:
     """조용히 틀리면 검색이 빈 결과를 내므로, 틀릴 수 있는 곳을 다 짚는다."""
     bad: list[str] = []
 
@@ -312,30 +384,40 @@ def check(rows: list[dict], sessions_path: str) -> list[str]:
             bad.append(f"청크 {r['chunk_index']}: 참여자 "
                        f"{sorted(people - got)} 가 dyad 에 없음")
 
-    # 4. 시각이 뒤집힌 청크
-    flipped = sum(1 for r in rows if r["ts_start"] > r["ts_end"])
+    # 4. 시각이 뒤집힌 청크. 시각이 없는 문서는 볼 것이 없다.
+    timed = [r for r in rows if r["ts_start"] and r["ts_end"]]
+    flipped = sum(1 for r in timed if r["ts_start"] > r["ts_end"])
     if flipped:
         bad.append(f"ts_start > ts_end 인 청크 {flipped}건")
+    if timed and len(timed) != len(rows):
+        bad.append(f"시각이 있는 청크와 없는 청크가 섞여 있습니다 "
+                   f"({len(timed)}/{len(rows)}건). 기간 필터가 절반만 걸립니다")
 
     # 5. dyad 가 하나도 없는 청크 (있으면 닉 필터가 그 청크를 영영 못 찾는다)
     silent = sum(1 for r in rows if not r["_pairs"])
     if silent:
         bad.append(f"dyad 가 없는 청크 {silent}건")
 
-    # 6. 임베딩 .npz 와 청크 수가 같은가
+    # 6. 임베딩 .npz 와 청크 수가 같은가.
+    #
+    #    이 메타데이터를 쓰는 문서만 본다. 예전에는 emb 디렉터리를 통째로
+    #    훑었는데, 문서가 늘면 관계없는 문서의 행 수까지 견주게 되어 멀쩡한
+    #    빌드가 매번 경고를 뱉는다. 행 수가 맞아야 하는 것은 같은 청크를
+    #    가리키는 문서들뿐이다.
     emb_dir = os.path.join(ROOT, "data", "emb")
-    if os.path.isdir(emb_dir):
+    if docs and os.path.isdir(emb_dir):
         for model in sorted(os.listdir(emb_dir)):
             d = os.path.join(emb_dir, model)
             if not os.path.isdir(d):
                 continue
-            for name in sorted(os.listdir(d)):
-                if not name.endswith("_embeddings.npz"):
+            for key in docs:
+                path = os.path.join(d, f"{key}_embeddings.npz")
+                if not os.path.isfile(path):
                     continue
-                with np.load(os.path.join(d, name), allow_pickle=False) as z:
+                with np.load(path, allow_pickle=False) as z:
                     n = int(z["embeddings"].shape[0])
                 if n != len(rows):
-                    bad.append(f"{model}/{name}: 청크 {n:,}개 "
+                    bad.append(f"{model}/{key}: 청크 {n:,}개 "
                                f"(메타데이터는 {len(rows):,}개)")
     return bad
 
@@ -343,13 +425,72 @@ def check(rows: list[dict], sessions_path: str) -> list[str]:
 # --------------------------------------------------------------------------
 # 단독 실행
 # --------------------------------------------------------------------------
+def build_one(meta_key: str, save: bool, want_jsonl: bool) -> list[str]:
+    """
+    메타키 하나를 굳힌다. 돌려주는 것은 검증에서 걸린 문제 목록이다.
+
+    문서별로 따로 도는 이유는 실패를 가두기 위해서다. ko_voice 가 깨졌다고
+    jabber 메타데이터까지 안 만들어지면, 멀쩡하던 검색이 새 문서 하나 때문에
+    통째로 멈춘다.
+    """
+    src = SOURCES[meta_key]
+    print(f"\n[{meta_key}]  {os.path.relpath(src['input'], ROOT)}")
+
+    if not os.path.isfile(src["input"]):
+        print(f"  [!] 입력이 없습니다: {src['input']}")
+        return [f"{meta_key}: 입력 없음"]
+
+    rows, stat = build(src["input"], src["has_time"])
+    for k, v in stat.items():
+        print(f"  {k:<20}{v:>9,}")
+    if not src["has_time"]:
+        print(f"  {'시각':<20}{'없음':>9}")
+
+    problems = check(rows, src["input"], src["docs"])
+    for bad in problems:
+        print(f"  [!] {bad}")
+    if not problems:
+        print("  검증 이상 없음")
+
+    if not save:
+        return problems
+
+    os.makedirs(META_DIR, exist_ok=True)
+    out = os.path.join(META_DIR, f"{meta_key}.npz")
+    info = save_npz(rows, out, src["input"], meta_key,
+                    src["has_time"], src["docs"])
+    print(f"  저장: {os.path.relpath(out, ROOT)}  "
+          f"({os.path.getsize(out) / 1e6:.1f}MB · 이름 {info['n_nicks']}개 · "
+          f"쌍 {info['n_dyads']:,}개)")
+
+    if src["nicks"]:
+        nick_path = os.path.join(META_DIR, f"{meta_key}_nicks.json")
+        nicks = save_nicks(rows, nick_path)
+        print(f"  저장: {os.path.relpath(nick_path, ROOT)}")
+        if nicks["ambiguous_lower"]:
+            print(f"  [!] 대소문자만 다른 닉 {len(nicks['ambiguous_lower'])}쌍: "
+                  f"{list(nicks['ambiguous_lower'].values())[:3]}")
+    else:
+        # 명부를 안 만드는 문서. 이름이 '가해자1' 처럼 역할 이름뿐이라
+        # 질문에 그렇게 적혀 올 일이 없고, 화이트리스트가 할 일이 없다.
+        # dyad 를 적기 위한 이름표는 .npz 안에 그대로 들어 있다.
+        print("  명부: 만들지 않음 (질문에 나올 이름이 아니다)")
+
+    if want_jsonl:
+        js = os.path.join(META_DIR, f"{meta_key}.jsonl")
+        save_jsonl(rows, js)
+        print(f"  저장: {os.path.relpath(js, ROOT)}  "
+              f"({os.path.getsize(js) / 1e6:.1f}MB)")
+
+    return problems
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="청크별 메타데이터(대화쌍·시각)를 굳힌다.")
-    ap.add_argument("--sessions", default=DEFAULT_SESSIONS)
-    ap.add_argument("--out", default=DEFAULT_OUT)
-    ap.add_argument("--jsonl", default=DEFAULT_JSONL)
-    ap.add_argument("--nicks", default=DEFAULT_NICKS)
+        description="청크별 메타데이터(대화쌍·시각)를 문서마다 한 벌씩 굳힌다.")
+    ap.add_argument("--doc", default="all",
+                    choices=sorted(SOURCES) + ["all"],
+                    help="굳힐 메타키 (기본 all)")
     ap.add_argument("--no-jsonl", action="store_true", help="검수용 jsonl 생략")
     ap.add_argument("--check", action="store_true", help="저장하지 않고 검증만")
     args = ap.parse_args()
@@ -360,40 +501,16 @@ def main() -> None:
         except (AttributeError, ValueError):
             pass
 
-    rows, stat = build(args.sessions)
-
-    print("[메타데이터]")
-    for k, v in stat.items():
-        print(f"  {k:<20}{v:>9,}")
-
-    problems = check(rows, args.sessions)
-    print("\n[검증]")
-    if problems:
-        for p in problems:
-            print(f"  [!] {p}")
-    else:
-        print("  이상 없음")
+    keys = sorted(SOURCES) if args.doc == "all" else [args.doc]
+    problems: list[str] = []
+    for key in keys:
+        problems += build_one(key, save=not args.check,
+                              want_jsonl=not args.no_jsonl)
 
     if args.check:
-        print("\n--check 라 저장하지 않았습니다.")
-        sys.exit(1 if problems else 0)
-
-    info = save_npz(rows, args.out, args.sessions)
-    nicks = save_nicks(rows, args.nicks)
-    print(f"\n저장: {args.out}  "
-          f"({os.path.getsize(args.out) / 1e6:.1f}MB · 닉 {info['n_nicks']}명 · "
-          f"쌍 {info['n_dyads']:,}개)")
-    print(f"저장: {args.nicks}")
-    if nicks["ambiguous_lower"]:
-        print(f"  [!] 대소문자만 다른 닉 {len(nicks['ambiguous_lower'])}쌍: "
-              f"{list(nicks['ambiguous_lower'].values())[:3]}")
-
-    if not args.no_jsonl:
-        save_jsonl(rows, args.jsonl)
-        print(f"저장: {args.jsonl}  "
-              f"({os.path.getsize(args.jsonl) / 1e6:.1f}MB)")
-
+        print(f"\n--check 라 저장하지 않았습니다.")
     if problems:
+        print(f"\n[!] 문제 {len(problems)}건")
         sys.exit(1)
 
 

@@ -40,7 +40,13 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from corpus import ALL_DOCS, Document, documents, find  # noqa: E402
+from corpus import (  # noqa: E402
+    ALL_DOCS,
+    Document,
+    documents,
+    find,
+    script_of,
+)
 
 DEFAULT_MODEL = "BAAI/bge-m3"
 
@@ -71,6 +77,12 @@ class Index:
     token_ends: np.ndarray       # (N,) int32
     model: str = ""
     n_docs: int = 0
+
+    # 청크를 세는 단위. 메타데이터를 함께 쓰는 문서는 같은 값을 갖는다
+    # (jabber_ru 와 jabber_en 은 같은 대화의 두 판본이므로 한 묶음).
+    group_names: tuple[str, ...] = ()       # 묶음 이름
+    group_codes: np.ndarray = field(        # (N,) group_names 의 첨자
+        default_factory=lambda: np.empty(0, np.int32), repr=False)
 
     @property
     def size(self) -> int:
@@ -182,6 +194,8 @@ def load_index(doc: str | None = None) -> Index:
     idx_parts, start_parts, end_parts = [], [], []
     doc_keys: list[str] = []
     doc_codes: list[str] = []
+    group_names: list[str] = []
+    group_of: list[int] = []
     model_name = ""
 
     for item in docs:
@@ -193,6 +207,9 @@ def load_index(doc: str | None = None) -> Index:
         end_parts.append(loaded["token_end"])
         doc_keys.extend([item.key] * loaded["n"])
         doc_codes.extend([item.code] * loaded["n"])
+        if item.group not in group_names:
+            group_names.append(item.group)
+        group_of.extend([group_names.index(item.group)] * loaded["n"])
         model_name = model_name or loaded["model"]
 
     return Index(
@@ -204,6 +221,8 @@ def load_index(doc: str | None = None) -> Index:
         chunk_indices=np.concatenate(idx_parts),
         token_starts=np.concatenate(start_parts),
         token_ends=np.concatenate(end_parts),
+        group_names=tuple(group_names),
+        group_codes=np.asarray(group_of, dtype=np.int32),
         model=model_name,
         n_docs=len(docs),
     )
@@ -289,10 +308,31 @@ def make_hit(index: Index, row: int, score: float) -> Hit:
 # 소문자로 미리 접어 둔 본문. 질의마다 31,044개를 다시 접으면 아깝다.
 _LOWER_TEXTS: dict[str, list[str]] = {}
 
-# 리터럴로 맞춰 볼 만한 키워드인가. 한글이 섞이면 버린다 — 원문이 러시아어와
-# 영어라 '서버' 같은 낱말은 본문에 그대로 나올 수 없고, 그런 뜻은 이미 질문
-# 임베딩이 처리하고 있다.
-KEYWORD_MIN_LEN = 3
+# 리터럴로 맞춰 볼 만한 키워드인가. 최소 길이는 문자 종류마다 다르다.
+#
+#     ascii    3글자. 'id' 'ip' 같은 두 글자는 아무 데나 들어 있다
+#     hangul   2글자. 한글은 글자당 정보가 많아 '통장' '검찰' 이면 충분하고,
+#              3글자를 요구하면 쓸 만한 낱말이 거의 다 걸러진다
+KEYWORD_MIN_LEN = {"ascii": 3, "hangul": 2}
+
+def index_scripts(index: Index) -> tuple[str, ...]:
+    """
+    이 색인에서 리터럴로 맞춰 볼 만한 문자 종류. 문서들의 합집합이다.
+
+    문서마다 다른 이유가 여기 있다. jabber 는 원문이 러시아어와 그 영어
+    번역이라 '대포통장' 같은 한글이 본문에 나올 수가 없다 — 걸어 봐야 0건이고,
+    그 뜻은 이미 질문 임베딩이 처리하고 있다. 반대로 ko_voice 는 원문이
+    한국어라 한글이야말로 제일 정확히 맞는 키워드다. 색인을 안 보고 하나로
+    정하면 어느 한쪽이 반드시 손해를 본다 (corpus.py DOC_SPECS 참고).
+    """
+    by_key = _doc_by_key()
+    out: list[str] = []
+    for key in dict.fromkeys(index.doc_keys):
+        doc = by_key.get(key)
+        for name in (doc.kw_scripts if doc else ("ascii",)):
+            if name not in out:
+                out.append(name)
+    return tuple(out)
 
 
 def _lower_texts(index: Index) -> list[str]:
@@ -303,12 +343,20 @@ def _lower_texts(index: Index) -> list[str]:
     return got
 
 
-def usable_keywords(keywords) -> list[str]:
-    """리터럴 대조에 쓸 수 있는 것만 남긴다 (ASCII, 3글자 이상)."""
+def usable_keywords(keywords, scripts: tuple[str, ...] = ("ascii",)
+                    ) -> list[str]:
+    """
+    리터럴 대조에 쓸 수 있는 것만 남긴다.
+
+    scripts 는 색인에 든 문서들이 받는 문자 종류다 (index_scripts 참고).
+    """
     out: list[str] = []
     for kw in keywords or []:
         text = str(kw).strip()
-        if len(text) >= KEYWORD_MIN_LEN and text.isascii() and text not in out:
+        kind = script_of(text)
+        if kind not in scripts:
+            continue
+        if len(text) >= KEYWORD_MIN_LEN.get(kind, 3) and text not in out:
             out.append(text)
     return out
 
@@ -316,6 +364,19 @@ def usable_keywords(keywords) -> list[str]:
 # 키워드를 다 맞춘 청크에 얹어 주는 점수. 코사인 점수 차이가 상위권에서
 # 0.01~0.05 라 이 정도면 순위를 바꾸되 뒤집지는 않는다.
 KEYWORD_BONUS = 0.05
+
+# 너무 흔한 낱말은 키워드에서 버린다.
+#
+# 후보를 '하나라도 든 청크' 로 잡기 때문에(OR), 전 청크에 걸리는 낱말이 하나
+# 섞이면 나머지 키워드의 축소 효과가 통째로 사라진다. ko_voice 에서 '통화' 는
+# 70/70, '본인' 은 45/70 이라 이런 말이 하나만 들어와도 채널이 무력해진다.
+#
+# 한국어 질문에서 특히 문제가 된다. 원문이 러시아어·영어일 때는 키워드가
+# ASCII 식별자뿐이라 이런 일이 없었지만, 한국어 원문에서는 질문에 쓰인 흔한
+# 명사가 그대로 키워드가 된다. 뽑는 자리(extract_metadata.KO_STOP)에도 그물이
+# 있지만, 목록으로 다 적을 수 없는 종류라 세어 보고 버리는 쪽이 확실하다.
+COMMON_RATIO = 0.5          # 이 비율을 넘게 걸리면 버린다
+COMMON_MIN_ROWS = 20        # 색인이 이보다 작으면 비율을 못 믿는다
 
 
 def keyword_signal(index: Index, keywords
@@ -342,44 +403,84 @@ def keyword_signal(index: Index, keywords
     하나도 안 걸리면 키워드를 통째로 버린다. 추출기가 원문에 없는 낱말을 하나
     끼워 넣었다고 검색이 빈손이 되면 안 된다.
     """
-    words = usable_keywords(keywords)
+    words = usable_keywords(keywords, index_scripts(index))
     if not words:
         return None, None, "", []
 
     texts = _lower_texts(index)
     hits = np.zeros(index.size, dtype=np.float32)
     matched: list[str] = []
+    common: list[str] = []
     for word in words:
         needle = word.lower()
         found = np.fromiter((needle in t for t in texts), dtype=bool,
                             count=index.size)
-        if found.any():
-            matched.append(word)
+        n_found = int(found.sum())
+        if not n_found:
+            continue
+        if (index.size >= COMMON_MIN_ROWS
+                and n_found > index.size * COMMON_RATIO):
+            common.append(word)          # 너무 흔하다. 세지도 않는다
+            continue
+        matched.append(word)
         hits += found
 
     if not matched:
-        return None, None, "키워드 무시(본문에 없음)", []
+        why = "너무 흔함" if common else "본문에 없음"
+        return None, None, f"키워드 무시({why})", []
 
     keep = hits >= 1
-    bonus = KEYWORD_BONUS * (hits / len(words))
+    bonus = KEYWORD_BONUS * (hits / len(matched))
     note = (f"키워드 {len(matched)}개" if len(matched) == len(words)
             else f"키워드 {len(matched)}/{len(words)}개")
+    if common:
+        note += f" (흔해서 뺌: {', '.join(common[:3])})"
     return keep, bonus, note, matched
 
 
-def expand_mask(index: Index, mask: np.ndarray | None) -> np.ndarray | None:
+def expand_mask(index: Index, mask) -> np.ndarray | None:
     """
     청크 마스크를 색인 행 마스크로 편다.
 
-    filter_metadata.py 가 주는 마스크는 청크 메타데이터 행(청크 번호 0..N-1)
-    기준이다. 색인은 문서를 여러 개 이어 붙인 것이라 (jabber_ru 15,522행 +
-    jabber_en 15,522행) 행 번호가 그대로 맞지 않는다. chunk_indices 로 되짚어
-    같은 청크의 모든 언어 판본을 함께 살린다.
+    받는 것이 두 가지다.
 
-    길이가 색인 행 수와 같으면 이미 행 마스크로 보고 그대로 쓴다.
+        사전 {문서키: 마스크}   filter_metadata.build_doc_masks 가 주는 것
+                                값이 None 이면 그 문서는 조건 없음(전부 통과),
+                                키가 아예 없으면 그 문서는 후보에서 제외
+        배열 하나              색인이 문서 하나일 때만 쓰는 옛 경로
+
+    **사전을 받는 것이 이 함수의 핵심이다.** 청크 번호는 문서 안에서만 유일해서
+    ko_voice 에도 5번 청크가 있고 jabber 에도 5번 청크가 있다. 마스크 하나를
+    번호로 갖다 붙이면 (mask[chunk_indices]) ko_voice 5번이 jabber 5번의 조건을
+    그대로 물려받는다 — "stern 과 poll 의 대화" 를 물었는데 보이스피싱 통화가
+    딸려 나오는 식이다. 문서별로 나눠 채워야 그 일이 없다.
+
+    같은 문서의 여러 언어 판본은 함께 살아난다. jabber_ru 와 jabber_en 은 각각
+    자기 키로 같은 마스크를 받으므로 청크 하나가 두 행 다 켜진다.
     """
     if mask is None:
         return None
+
+    if isinstance(mask, dict):
+        keys = np.asarray(index.doc_keys)
+        out = np.zeros(index.size, dtype=bool)
+        for key in dict.fromkeys(index.doc_keys):
+            if key not in mask:                  # 후보에서 뺀 문서
+                continue
+            rows = keys == key
+            got = mask[key]
+            if got is None:                      # 조건 없음 -> 전부 통과
+                out[rows] = True
+                continue
+            got = np.asarray(got, dtype=bool)
+            here = index.chunk_indices[rows]
+            top = int(here.max()) + 1 if here.shape[0] else 0
+            if got.shape[0] < top:
+                raise ValueError(f"{key}: 마스크 길이가 맞지 않습니다 "
+                                 f"({got.shape[0]}, 청크 번호는 {top}까지)")
+            out[rows] = got[here]
+        return out
+
     mask = np.asarray(mask, dtype=bool)
     if mask.shape[0] == index.size:
         return mask
@@ -420,15 +521,33 @@ class Narrowing:
 
 
 def chunk_count(index: Index, mask: np.ndarray | None) -> int:
-    """행 마스크가 가리키는 서로 다른 청크 수."""
-    if mask is None:
-        return int(np.unique(index.chunk_indices).shape[0])
-    return int(np.unique(index.chunk_indices[mask]).shape[0])
+    """
+    행 마스크가 가리키는 서로 다른 청크 수.
+
+    청크 번호만으로 세면 안 된다. 번호가 문서마다 0부터 다시 시작해서 ko_voice
+    70개가 jabber 0~69번에 통째로 흡수된다 (합쳐도 15,522개로 보인다).
+    (묶음, 번호) 쌍으로 센다.
+
+    묶음으로 세는 것이지 문서로 세는 것이 아니다. jabber_ru 와 jabber_en 은
+    같은 대화의 두 판본이라 행이 두 벌 있을 뿐 청크는 한 벌이고, 문서로 세면
+    화면 숫자가 두 배로 보인다.
+    """
+    codes, idx = index.group_codes, index.chunk_indices
+    if mask is not None:
+        codes, idx = codes[mask], idx[mask]
+    if idx.shape[0] == 0:
+        return 0
+    # (묶음, 번호) 를 정수 하나로 접는다. 번호 최대값+1 을 자릿수로 쓴다.
+    span = int(idx.max()) + 1
+    return int(np.unique(codes.astype(np.int64) * span + idx).shape[0])
 
 
-def narrow(index: Index, mask: np.ndarray | None, keywords=None) -> Narrowing:
+def narrow(index: Index, mask=None, keywords=None) -> Narrowing:
     """
     메타 마스크와 키워드 채널을 합친다.
+
+    mask 는 배열 하나가 아니라 {문서키: 마스크} 사전일 수 있다
+    (filter_metadata.build_doc_masks). expand_mask 가 알아서 편다.
 
     둘 다 통과하는 청크가 없으면 키워드를 먼저 푼다. 사람·기간은 명부와 날짜
     파싱을 통과한 것이라 근거가 단단하지만, 키워드는 추출기가 질문에서 주워
@@ -473,7 +592,7 @@ def narrow(index: Index, mask: np.ndarray | None, keywords=None) -> Narrowing:
 def search(query: str, doc: str | None = None, top_k: int = DEFAULT_TOP_K,
            model_name: str = DEFAULT_MODEL,
            device: str | None = None,
-           mask: np.ndarray | None = None,
+           mask=None,
            keywords: list[str] | None = None,
            narrowing: "Narrowing | None" = None) -> SearchResult:
     """
@@ -572,10 +691,12 @@ def main() -> None:
                     if k.strip()]
 
     if args.extract or args.people or args.since or args.until:
-        from filter_metadata import build_mask
-        picked = build_mask(raw)
-        mask = picked.mask
+        from filter_metadata import build_doc_masks
+        picked = build_doc_masks(raw, args.doc)
+        mask = picked.masks
         print(f"메타 : {picked.summary()}")
+        for note in picked.notes:
+            print(f"       {note}")
 
     nr = narrow(load_index(args.doc), mask, keywords)
     print(f"좁힘 : 메타 {nr.n_meta if nr.n_meta is not None else '-'} · "

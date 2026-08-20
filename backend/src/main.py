@@ -26,7 +26,7 @@
 
 0단계는 검색 범위를 좁히는 일이고, 채널이 둘이다.
 
-    질문 -> 4B -> 사람·기간          -> 메타 채널   (chunk_meta.npz 를 본다)
+    질문 -> 4B -> 사람·기간          -> 메타 채널   (문서별 .npz 를 본다)
                  키워드              -> 키워드 채널 (본문 글자를 본다)
                                         |
                                      교집합 = 검색 후보
@@ -58,7 +58,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from answer import AnswerResult  # noqa: E402
 from corpus import doc_label  # noqa: E402
 from extract_metadata import ExtractResult, extract  # noqa: E402
-from filter_metadata import FilterResult, build_mask  # noqa: E402
+from filter_metadata import FilterResult, build_doc_masks  # noqa: E402
 from grade import GradeResult, grade_answer, grade_chunks  # noqa: E402
 from rerank import FINAL_TOP_N, RerankResult  # noqa: E402
 from search import (  # noqa: E402
@@ -130,6 +130,7 @@ def run_pipeline(question: str, doc: str | None = None,
                  final_n: int = FINAL_TOP_N,
                  gold: list[str] | None = None,
                  gold_chunks: list[int] | None = None,
+                 gold_doc: str = "",
                  answer_language: str | None = None,
                  on_stage=None,
                  meta_mode: str | None = None) -> PipelineResult:
@@ -169,16 +170,21 @@ def run_pipeline(question: str, doc: str | None = None,
     # --- 0 단계 : 조건 추출 + 후보 좁히기 -----------------------------------
     # 추출이 실패해도 여기서 멈추지 않는다. extract() 안에서 규칙 결과로
     # 되돌아가고, 그래도 조건이 없으면 mask 가 None 이라 전체를 뒤진다.
-    ex = extract(clean, mode=meta_mode)
+    # doc 을 같이 넘긴다. 이름을 어느 문서의 명부에 대조할지가 이걸로 갈린다
+    # (안 넘기면 문서와 무관하게 jabber 명부 289명으로만 대조한다).
+    ex = extract(clean, mode=meta_mode, doc=doc)
     emit("extract", ex)
 
-    fr = build_mask(ex.query)
+    # 문서마다 메타데이터가 따로다. 마스크도 문서마다 하나씩 만든다 —
+    # 하나로 만들어 색인 전체에 갖다 붙이면 청크 번호가 겹치는 문서가 남의
+    # 조건을 물려받는다 (search.expand_mask 참고).
+    fr = build_doc_masks(ex.query, doc)
     emit("filter", fr)
 
     # 메타 채널과 키워드 채널이 각각 몇 개를 남겼고 교집합이 몇 개인지.
     # 검색보다 먼저 끝내는 이유는 화면에 이 숫자를 먼저 띄우기 위해서다
     # (질의 임베딩에 몇 초가 걸린다).
-    nr = narrow(load_index(doc), fr.mask, ex.query.keywords)
+    nr = narrow(load_index(doc), fr.masks, ex.query.keywords)
     emit("narrow", nr)
 
     # --- 1 단계 : 검색 랭킹 -------------------------------------------------
@@ -198,7 +204,10 @@ def run_pipeline(question: str, doc: str | None = None,
     gr = None
     answer_text = ans.answer if (ans and ans.ok) else ""
     if gold_chunks:
-        gr = grade_chunks(clean, rr.selected, gold_chunks, answer_text)
+        # gold_doc 을 같이 넘긴다. 청크 번호는 문서 안에서만 유일해서, 문서를
+        # 안 보면 ko#93 이 jabber 문항(정답 [93,94])의 정답으로 잡힌다.
+        gr = grade_chunks(clean, rr.selected, gold_chunks, answer_text,
+                          gold_doc=gold_doc)
         emit("grade", gr)
     elif gold:
         gr = grade_answer(clean, answer_text, gold)

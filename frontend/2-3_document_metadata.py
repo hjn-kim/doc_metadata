@@ -184,7 +184,7 @@ def render_meta(ex, fr, nr=None) -> None:
 
     dropped = ""
     if q.unknown:
-        dropped = (f'<div class="query-note">명부(nicks.json)에 없어 버린 이름 · '
+        dropped = (f'<div class="query-note">어느 문서 명부에도 없어 버린 이름 · '
                    f'{escape(", ".join(q.unknown))}</div>')
 
     funnel = ""
@@ -221,6 +221,19 @@ def render_meta(ex, fr, nr=None) -> None:
         relaxed = (f'<div class="query-note">조건이 너무 좁아 '
                    f'{escape(" → ".join(fr.relaxed))} 을(를) 풀었습니다.</div>')
 
+    # 문서마다 메타데이터가 달라서 조건이 걸리는 문서와 안 걸리는 문서가 갈린다.
+    # 그 사실을 안 보여주면 "왜 보이스피싱 통화가 하나도 안 나왔지" 를 화면에서
+    # 되짚을 방법이 없다 (필터가 뺀 것인지 검색이 못 찾은 것인지 구분이 안 된다).
+    per_doc = ""
+    if fr is not None and fr.notes:
+        def note_line(key: str, text: str) -> str:
+            return (f'<div class="kv-line">'
+                    f'<span class="kv-key">{key}</span>'
+                    f'<span class="kv-val">{escape(text)}</span></div>')
+
+        per_doc = note_line("문서별", fr.notes[0]) + "".join(
+            note_line("", n) for n in fr.notes[1:])
+
     error = ""
     if ex.error:
         error = (f'<div class="query-note">추출 중 오류 · '
@@ -232,6 +245,7 @@ def render_meta(ex, fr, nr=None) -> None:
             <div class="card-title">1. 필터링
                 {"".join(tags)}</div>
             {blocks}
+            {per_doc}
             {funnel}
             {dropped}
             {relaxed}

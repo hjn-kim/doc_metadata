@@ -125,6 +125,11 @@ def filter_to_dict(fr: FilterResult | None) -> dict | None:
         "step": fr.step,
         "relaxed": list(fr.relaxed),
         "summary": fr.summary(),
+        # 문서마다 조건이 다르게 걸린다. 어느 문서가 왜 빠졌는지를 화면이
+        # 보여줄 수 있어야 "왜 이 문서에서 안 나왔지" 를 되짚을 수 있다.
+        # masks 는 계산용 배열이라 여전히 안 보낸다.
+        "excluded": list(fr.excluded),
+        "notes": list(fr.notes),
     }
 
 
@@ -138,6 +143,8 @@ def filter_from_dict(d: dict | None) -> FilterResult | None:
         n_kept=int(d.get("n_kept", 0)),
         step=d.get("step", ""),
         relaxed=list(d.get("relaxed", [])),
+        excluded=list(d.get("excluded", [])),
+        notes=list(d.get("notes", [])),
     )
 
 

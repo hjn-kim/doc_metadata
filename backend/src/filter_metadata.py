@@ -73,7 +73,13 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from chunk_meta import ChunkMeta, from_epoch, load_chunk_meta  # noqa: E402
+from chunk_meta import (  # noqa: E402
+    ChunkMeta,
+    from_epoch,
+    load_chunk_meta,
+    meta_for,
+)
+from corpus import Document, documents_for, script_of  # noqa: E402
 
 # 추출기가 사람을 적어 보낼 수 있는 이름들. 역할별로 받되, 필터에서는 셋을
 # 합쳐 쓴다 — 청크 메타데이터에 방향이 없기 때문이다 (chunk_meta.py 참고).
@@ -252,12 +258,28 @@ class FilterResult:
     step: str = "전체"                  # 실제로 걸린 사다리 단계
     relaxed: list[str] = field(default_factory=list)   # 시도했다 비어서 푼 것
 
+    # --- 문서별 결과 (build_doc_masks 가 채운다) -------------------------
+    #
+    # 문서마다 메타데이터가 다르므로 마스크도 문서마다 다르다. 예전처럼 마스크
+    # 하나를 색인 전체에 갖다 붙이면, 청크 번호가 겹치는 다른 문서가 남의
+    # 조건을 물려받는다. search.expand_mask 가 이 사전을 문서별로 편다.
+    #
+    #     masks[문서키] is None   조건 없음 -> 그 문서는 전부 통과
+    #     masks[문서키] = 배열    그 문서의 청크 마스크 (0..N-1)
+    #     excluded 에 있는 문서   후보에서 통째로 뺐다
+    masks: dict[str, np.ndarray | None] | None = None
+    excluded: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)     # 문서별 한 줄 설명
+
     @property
     def ratio(self) -> float:
         return self.n_kept / self.n_total if self.n_total else 1.0
 
     @property
     def filtered(self) -> bool:
+        if self.masks is not None:
+            return bool(self.excluded) or any(m is not None
+                                              for m in self.masks.values())
         return self.mask is not None
 
     def summary(self) -> str:
@@ -265,6 +287,8 @@ class FilterResult:
                 f"({100 * self.ratio:.1f}%)")
         if self.relaxed:
             head += f"  [완화: {' -> '.join(self.relaxed)}]"
+        if self.excluded:
+            head += f"  [제외한 문서: {', '.join(self.excluded)}]"
         if self.query.unknown:
             head += f"  [모르는 이름: {', '.join(self.query.unknown)}]"
         return head
@@ -318,6 +342,322 @@ def build_mask(raw: dict | MetaQuery,
     # 전부 0건. 필터를 포기하고 전체를 넘긴다 — 근거 없는 답변보다 낫다.
     return FilterResult(query=q, mask=None, n_total=n, n_kept=n,
                         step="전체(포기)", relaxed=relaxed)
+
+
+# --------------------------------------------------------------------------
+# 문서별 마스크 — 파이프라인이 실제로 쓰는 입구
+# --------------------------------------------------------------------------
+
+def normalize_across(raw: dict, metas: list[ChunkMeta]) -> MetaQuery:
+    """
+    문서 여럿의 명부를 한꺼번에 대조해서 MetaQuery 를 만든다.
+
+    명부가 문서마다 다르므로 "모르는 이름" 도 문서마다 다르다. 한 문서 기준으로
+    정규화하면, 다른 문서에만 있는 이름이 조용히 버려진다. 어느 문서든 아는
+    이름이면 살리고, **아무 문서도 모르는 이름만** unknown 으로 내린다.
+
+    조건을 실제로 거는 것은 문서별 mask_people 이라, 자기가 모르는 이름은
+    그 문서에서 알아서 빠진다. 여기서는 넓게 살려 두기만 하면 된다.
+    """
+    if not metas:
+        return normalize(raw, _empty_meta())
+
+    parts = [normalize(raw, m) for m in metas]
+    merged = parts[0]
+
+    def union(attr: str) -> list[str]:
+        out: list[str] = []
+        for q in parts:
+            for name in getattr(q, attr):
+                if name not in out:
+                    out.append(name)
+        return out
+
+    known = set(union("people"))
+    unknown: list[str] = []
+    for q in parts:
+        for name in q.unknown:
+            if name not in known and name not in unknown:
+                unknown.append(name)
+
+    return MetaQuery(
+        people=union("people"),
+        sender=union("sender"),
+        receiver=union("receiver"),
+        participants=union("participants"),
+        unknown=unknown,
+        since=merged.since, until=merged.until,
+        keywords=merged.keywords,
+    )
+
+
+class Roster:
+    """
+    스코프 안 문서들의 이름 명부. "이 이름이 실재하는가" 한 가지를 답한다.
+
+    명부가 문서마다 다르기 때문에 필요한 물건이다. 예전에는 명부가 한 벌
+    (jabber 289명)이라 아무 데서나 load_chunk_meta().resolve() 를 불렀는데,
+    그러면 '가해자17' 이 jabber 명부에 없다는 이유로 버려진다 — ko_voice.npz
+    안에 그 이름이 멀쩡히 있는데도.
+
+    대조 순서:
+
+        1. 스코프 안 문서들의 명부를 차례로 본다. 아는 문서가 있으면 그 문서가
+           쓰는 정식 표기로 돌려준다 ('Stern' -> 'stern').
+        2. 아무도 모르는 이름은
+             - 명부 파일(_nicks.json)이 없는 문서가 스코프에 있으면 그대로 통과
+             - 아니면 None (조건에서 버린다)
+
+    2번의 통과 규칙은 '명부를 두지 않는 문서' 를 위한 자리다. 그런 문서에서는
+    질문에 적힌 이름을 확인해 줄 화이트리스트가 없으므로, 버리는 대신 그대로
+    넘기고 실제 판정은 mask_people 에 맡긴다. 없는 이름이면 거기서 0건이 되고,
+    filter_metadata 의 사다리가 조건을 풀어 준다.
+
+    ChunkMeta 와 같은 resolve() 를 갖고 있어서 normalize() 에 그대로 넣을 수
+    있다 (normalize 는 meta 에서 resolve 하나만 쓴다).
+    """
+
+    def __init__(self, docs: list[Document]):
+        self.docs = list(docs)
+        self.metas = [m for m in (meta_for(d) for d in self.docs)
+                      if m is not None]
+        # 명부를 두지 않는 문서가 스코프에 있는가. 있으면 모르는 이름을 버리지
+        # 않는다. 이 한 줄을 False 로 고정하면 예전처럼 전부 화이트리스트다.
+        self.passthrough = any(not d.has_nicks for d in self.docs)
+
+    @property
+    def hangul(self) -> bool:
+        """
+        이름에 한글을 쓰는 문서가 스코프에 있는가. 규칙 패턴이 이걸 본다.
+
+        '비ASCII' 로 갈음하면 안 된다. jabber 닉 289개 중 'стов' 하나가
+        키릴이라, 그것 때문에 jabber 만 뒤지는 질문에서도 한글 이름 패턴이
+        켜지고 "지난달의 대화" 가 사람 조건으로 잡힌다.
+        """
+        return any(script_of(n) == "hangul"
+                   for m in self.metas for n in m.nicks)
+
+    @property
+    def names(self) -> list[str]:
+        """스코프 안 모든 이름."""
+        out: list[str] = []
+        for meta in self.metas:
+            for name in meta.nicks:
+                if name not in out:
+                    out.append(str(name))
+        return out
+
+    @property
+    def has_time(self) -> bool:
+        """기간으로 물어볼 수 있는 문서가 하나라도 있는가."""
+        return any(d.has_time and d.has_meta for d in self.docs)
+
+    @property
+    def name_scripts(self) -> tuple[str, ...]:
+        """명부에 실제로 있는 이름의 문자 종류. 프롬프트 보기를 고르는 데 쓴다."""
+        out: list[str] = []
+        for meta in self.metas:
+            for name in meta.nicks:
+                kind = script_of(name)
+                if kind not in out:
+                    out.append(kind)
+        return tuple(out)
+
+    @property
+    def kw_scripts(self) -> tuple[str, ...]:
+        """본문에 그대로 나올 수 있는 문자 종류. 문서들의 합집합."""
+        out: list[str] = []
+        for doc in self.docs:
+            for name in doc.kw_scripts:
+                if name not in out:
+                    out.append(name)
+        return tuple(out)
+
+    def groups(self) -> list[tuple[str, list[Document], ChunkMeta | None]]:
+        """메타데이터를 함께 쓰는 문서끼리 묶어서. 화면·프롬프트 설명에 쓴다."""
+        by: dict[str, list[Document]] = {}
+        for doc in self.docs:
+            by.setdefault(doc.group, []).append(doc)
+        return [(g, ds, meta_for(ds[0])) for g, ds in by.items()]
+
+    def prompt_names(self, cap: int = 320) -> list[str]:
+        """
+        프롬프트에 실을 명부. 문서마다 몫을 나눠 뽑는다.
+
+        앞에서부터 자르면 안 된다. 전체 검색이면 jabber 289 + ko_voice 138 =
+        427명이라 320에서 자르는 순간 ko_voice 이름이 통째로 날아가고, 4B 는
+        '가해자17' 을 "명부에 없는 이름" 으로 보게 된다. 문서 수로 나눠 각자
+        몫만큼 실으면 어느 문서도 통째로 빠지지 않는다.
+        """
+        buckets = [[str(n) for n in m.nicks] for m in self.metas if m.nicks]
+        if not buckets:
+            return []
+
+        share = max(1, cap // len(buckets))
+        out: list[str] = []
+        for names in buckets:
+            for name in names[:share]:
+                if name not in out:
+                    out.append(name)
+
+        # 몫을 다 못 쓴 문서가 있으면 남은 자리를 앞 문서부터 채운다.
+        if len(out) < cap:
+            for names in buckets:
+                for name in names:
+                    if len(out) >= cap:
+                        break
+                    if name not in out:
+                        out.append(name)
+        return out
+
+    def resolve(self, nick: str | None) -> str | None:
+        if not nick:
+            return None
+        name = str(nick).strip()
+        if not name:
+            return None
+        for meta in self.metas:
+            got = meta.resolve(name)
+            if got is not None:
+                return got
+        return name if self.passthrough else None
+
+
+def normalize_across(raw: dict, docs: list[Document]) -> MetaQuery:
+    """
+    스코프 안 문서들의 명부를 한꺼번에 보고 MetaQuery 를 만든다.
+
+    Roster 가 문서별 대조를 대신하므로 normalize 를 한 번만 부르면 된다.
+    """
+    return normalize(raw, Roster(docs))
+
+
+def _why_excluded(doc: Document, q: MetaQuery, meta: ChunkMeta | None,
+                  people: list[str] | None = None) -> str:
+    """
+    이 문서를 후보에서 빼야 하는가. 빼야 하면 그 이유, 아니면 빈 문자열.
+
+    규칙은 하나다 — **조건을 만족시킬 방법이 아예 없는 문서는 뺀다.**
+
+        "2020-09 대화"      ko_voice 에는 시각이 없다 -> 뺀다
+        "stern 과 poll"     ko_voice 명부에 그런 이름이 없다 -> 뺀다
+
+    통과시켜 두고 dense 점수에 맡길 수도 있지만, 그러면 조건을 건 질문일수록
+    엉뚱한 문서가 상위에 섞인다. 조건이 잡혔다는 것은 이미 그 문서 얘기라는
+    뜻이다.
+
+    빼는 것이 늘 옳지는 않아서, 문서가 전부 빠지면 build_doc_masks 가 통째로
+    되돌린다. 최악이 '안 좁힌 검색' 이어야 한다는 원칙은 그대로다.
+
+    people 은 **어느 문서든 명부로 확인된 이름만** 추린 것이다. q.people 을
+    그대로 쓰면 안 된다: Roster 의 통과 규칙 때문에 아무도 모르는 이름이 섞여
+    들어올 수 있고, 그 이름 하나 때문에 모든 문서가 빠지면 멀쩡한 기간 조건까지
+    같이 버려진다 ("2020-09-29 zzz999가 말한..." 이 날짜 필터를 잃는다).
+    """
+    people = q.people if people is None else people
+    if q.since or q.until:
+        if not doc.has_time:
+            return "시각 없음"
+        if meta is None:
+            return "메타데이터 없음"
+
+    if people:
+        if meta is None or not doc.has_people:
+            return "메타데이터 없음"
+        if not any(meta.resolve(n) for n in people):
+            return "명부에 없는 이름"
+
+    return ""
+
+
+def build_doc_masks(raw: dict | MetaQuery,
+                    docs: list[Document] | str | None = None) -> FilterResult:
+    """
+    조건 -> **문서마다 하나씩** 마스크. 파이프라인은 build_mask 대신 이것을 쓴다.
+
+    build_mask 는 메타데이터 한 벌 안에서만 도는 함수다. 문서가 여럿이면 그
+    한 벌이 어느 문서 것인지가 문제가 되고, 잘못 고르면 청크 번호가 겹치는
+    다른 문서가 남의 조건을 물려받는다. 여기서 문서를 먼저 갈라 준다.
+
+        1. 같은 메타데이터를 쓰는 문서끼리 묶는다 (jabber_ru + jabber_en)
+        2. 묶음마다 자기 .npz 로 build_mask 를 돈다
+        3. 조건을 만족시킬 수 없는 묶음은 통째로 뺀다 (_why_excluded)
+        4. 다 빠졌으면 전부 되돌린다
+
+    docs 에 문자열을 주면 그 문서 하나로 좁힌다 (search 의 --doc 과 같은 값).
+    """
+    targets = documents_for(docs) if isinstance(docs, (str, type(None)))         else list(docs)
+
+    # 1. 메타데이터를 함께 쓰는 문서끼리 묶는다. jabber_ru 와 jabber_en 은 같은
+    #    대화의 두 판본이라 마스크가 같다 — 두 번 계산할 이유가 없다.
+    groups: dict[str, list[Document]] = {}
+    for doc in targets:
+        groups.setdefault(doc.group, []).append(doc)
+
+    metas = {g: meta_for(members[0]) for g, members in groups.items()}
+    known = [m for m in metas.values() if m is not None]
+
+    q = raw if isinstance(raw, MetaQuery) else normalize_across(raw, targets)
+
+    if q.empty:
+        n = sum(m.size for m in known)
+        return FilterResult(query=q, mask=None, masks=None,
+                            n_total=n, n_kept=n, step="조건 없음")
+
+    # 어느 문서든 명부로 확인된 이름만. 아무도 모르는 이름뿐이면 사람 조건은
+    # 없는 것으로 본다 (그 이름 하나로 전 문서를 빼면 기간 조건까지 날아간다).
+    real_people = [n for n in q.people
+                   if any(m is not None and m.resolve(n) for m in metas.values())]
+
+    masks: dict[str, np.ndarray | None] = {}
+    excluded: list[str] = []
+    notes: list[str] = []
+    relaxed: list[str] = []
+    steps: list[str] = []
+    n_total = n_kept = 0
+
+    for group, members in groups.items():
+        meta = metas[group]
+        keys = [d.key for d in members]
+        why = _why_excluded(members[0], q, meta, real_people)
+
+        if why:
+            excluded.extend(keys)
+            notes.append(f"{group}: 제외 ({why})")
+            # 제외한 문서의 청크는 분모에도 넣지 않는다. 후보가 될 수 없는
+            # 것을 세면 "15,592개 중 20개" 가 "몇 개 중 몇 개" 인지 흐려진다.
+            continue
+
+        n_total += meta.size
+        got = build_mask(q, meta)
+        masks.update({k: got.mask for k in keys})
+        n_kept += got.n_kept if got.mask is not None else meta.size
+        steps.append(f"{group}: {got.step}")
+        relaxed.extend(f"{group} {r}" for r in got.relaxed)
+        notes.append(f"{group}: {got.step} {got.n_kept:,}/{meta.size:,}개")
+
+    # 4. 전부 빠졌다. 필터를 포기하고 전체를 넘긴다 — 0건짜리 검색보다 낫다.
+    if not masks:
+        n = sum(m.size for m in known)
+        return FilterResult(query=q, mask=None, masks=None,
+                            n_total=n, n_kept=n, step="전체(전 문서 제외)",
+                            relaxed=relaxed, notes=notes)
+
+    # 아무 문서도 안 빠졌고 어느 문서도 좁혀지지 않았다. 마스크를 통째로
+    # None 으로 돌려준다 — 전부 True 인 마스크를 넘기면 search.narrow 가
+    # "메타 15,592청크" 라고 적어 조건이 걸린 것처럼 보인다.
+    if not excluded and all(m is None for m in masks.values()):
+        n = sum(m.size for m in known)
+        return FilterResult(query=q, mask=None, masks=None, notes=notes,
+                            n_total=n, n_kept=n,
+                            step=" · ".join(steps) or "조건 없음",
+                            relaxed=relaxed)
+
+    return FilterResult(
+        query=q, mask=None, masks=masks, excluded=excluded, notes=notes,
+        n_total=n_total, n_kept=n_kept,
+        step=" · ".join(steps) or "조건 없음", relaxed=relaxed,
+    )
 
 
 def filter_rows(raw: dict, meta: ChunkMeta | None = None) -> np.ndarray:

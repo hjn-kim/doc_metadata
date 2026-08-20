@@ -216,8 +216,26 @@ def normalize(text: str) -> str:
     return re.sub(r"[\s\W_]+", "", text, flags=re.UNICODE)
 
 
+@lru_cache(maxsize=32)
+def _group_of(doc_key: str) -> str:
+    """
+    문서 키 -> 청크 번호가 유일한 묶음 이름. 모르는 문서면 빈 문자열.
+
+    jabber_ru 와 jabber_en 은 같은 대화의 두 판본이라 한 묶음("jabber")이고,
+    ko_voice 는 자기 혼자 한 묶음이다 (corpus.py 의 Document.group).
+    """
+    if not doc_key:
+        return ""
+    try:
+        from corpus import find
+        doc = find(doc_key)
+    except (KeyError, ImportError):
+        return ""
+    return doc.group if doc else ""
+
+
 def grade_chunks(question: str, selected, gold_chunks,
-                 llm_answer: str = "") -> GradeResult:
+                 llm_answer: str = "", gold_doc: str = "") -> GradeResult:
     """
     최종 선정된 청크에 정답 청크가 하나라도 들었으면 정답으로 본다.
 
@@ -235,12 +253,28 @@ def grade_chunks(question: str, selected, gold_chunks,
 
     청크 번호는 언어와 무관하다. ru#93 과 en#93 은 같은 대화의 두 판본이라
     둘 중 무엇이 뽑혀도 93 으로 센다.
+
+    다만 **문서가 다르면 같은 번호라도 다른 청크다.** 청크 번호는 문서 안에서만
+    유일해서 ko_voice 에도 93번이 있고 jabber 에도 93번이 있다. 번호만 보고
+    채점하면 jabber 문항(정답 [93, 94])에 ko#93 이 뽑혀 와도 정답이 된다.
+    gold_doc 을 주면 그 문서와 같은 묶음에서 나온 청크만 센다.
+
+    gold_doc 을 안 주면 예전처럼 번호만 본다 (문서가 하나뿐인 옛 호출부).
     """
     started = time.time()
     gold = [int(c) for c in (gold_chunks or [])]
-    picked = []
+    gold_group = _group_of(gold_doc)
+
+    picked, dropped = [], 0
     for hit in selected or []:
         index = getattr(hit, "chunk_index", hit)
+        if gold_group:
+            key = getattr(hit, "doc_key", "")
+            # doc_key 가 없으면 그냥 번호만 온 것이다. 판단할 근거가 없으니
+            # 예전대로 센다 (여기서 버리면 옛 호출부가 전부 오답이 된다).
+            if key and _group_of(key) != gold_group:
+                dropped += 1
+                continue
         picked.append(int(index))
 
     hit_chunks = [c for c in gold if c in picked]
@@ -264,6 +298,8 @@ def grade_chunks(question: str, selected, gold_chunks,
         result.verdict = "오답"
         result.reason = (f"최종 청크 {', '.join(f'#{c}' for c in sorted(set(picked)))} "
                          f"에 정답 청크가 없습니다.")
+        if dropped:
+            result.reason += f" (다른 문서에서 온 청크 {dropped}개는 뺐습니다)"
 
     result.elapsed = time.time() - started
     return result
@@ -350,12 +386,37 @@ def main() -> None:
             except KeyError:
                 code = "??"
             print(f"{q.id:>2}  [{code:<3}] {q.question}")
-            print(f"      정답 {q.answer}")
-            print(f"      후보 {' / '.join(q.keywords) or '(없음)'}")
+            # 이 세트가 들고 있는 정답은 청크 번호다. 모범 답안·후보 낱말은
+            # 옛 법률 세트에만 있으므로 있을 때만 적는다.
+            if q.answer_chunks:
+                nums = " ".join(f"#{c}" for c in q.answer_chunks)
+                print(f"      정답 청크 {nums}")
+            if q.answer:
+                print(f"      정답 {q.answer}")
+            if q.keywords:
+                print(f"      후보 {' / '.join(q.keywords)}")
 
-        missing = [q.id for q in items if not q.keywords]
+        # 채점할 근거가 아예 없는 문항. 청크도 후보도 없으면 '판정 불가'가 된다.
+        missing = [q.id for q in items if not q.keywords and not q.answer_chunks]
         if missing:
-            print(f"\n[!] 정답 후보가 없는 번호: {missing}")
+            print(f"\n[!] 채점 근거(정답 청크·후보)가 없는 번호: {missing}")
+
+        # doc 이 비면 어느 문서의 청크 번호인지 알 수 없다. 문서가 여럿인
+        # 지금은 번호만으로 채점하면 다른 문서의 같은 번호가 정답이 된다.
+        no_doc = [q.id for q in items if not q.doc]
+        if no_doc:
+            print(f"[!] doc 이 없는 번호: {no_doc}")
+
+        # 번호는 id 문자열의 마지막 숫자다 (_question_id). 문서가 여럿이면
+        # 'jabber-001' 과 'ko-001' 이 똑같이 1번이 되어 --run 1 이 어느 쪽을
+        # 고르는지 알 수 없다. qa.json 에서 번호대를 나눠 적어야 한다.
+        seen: dict[int, list[str]] = {}
+        for row, q in zip(load_questions(), items):
+            seen.setdefault(q.id, []).append(q.question[:28])
+        dupes = {k: v for k, v in seen.items() if len(v) > 1}
+        if dupes:
+            print(f"[!] 번호가 겹치는 문항 {sorted(dupes)} — qa.json 의 id 에서 "
+                  f"문서마다 번호대를 나누세요 (jabber 1~99, ko 101~)")
 
         unknown = []
         for q in items:
@@ -396,8 +457,15 @@ def main() -> None:
             print("=" * 60)
         for q in targets:
             doc = q.doc if mode == "gold" else mode
-            result = run_pipeline(q.question, doc=doc, gold=q.keywords)
-            gr = result.grade
+            # 정답 청크가 있으면 그것으로 채점한다. 이 세트가 들고 있는 것이
+            # answer_chunk_indices 라, 예전처럼 gold(=keywords)만 넘기면
+            # 판정 근거가 없어 GradeResult 가 아예 안 만들어진다.
+            result = run_pipeline(q.question, doc=doc, gold=q.keywords,
+                                  gold_chunks=q.answer_chunks,
+                                  gold_doc=q.doc)
+            gr = result.grade or GradeResult(
+                question=q.question, verdict="판정 불가",
+                reason="정답 청크도 정답 후보도 없습니다.")
             rows.append((q, doc, gr))
 
             mark = "O" if gr.correct else ("?" if gr.verdict == "판정 불가" else "X")
@@ -405,7 +473,8 @@ def main() -> None:
                   f"{gr.verdict}   {result.elapsed:.1f}초")
             print(f"     질문      : {q.question}")
             print(f"     LLM 답변  : {gr.llm_answer[:110]}")
-            print(f"     실제 정답 : {q.answer}")
+            print(f"     정답 청크 : {' '.join(gr.candidates) or '(없음)'}"
+                  f"   -> 맞힌 것 {' '.join(gr.matched) or '(없음)'}")
             # 단계별 실패는 조용히 넘어가면 정답률만 보고 원인을 못 찾는다.
             for stage, message in result.errors().items():
                 print(f"     [!] {stage} 실패: {message[:90]}")

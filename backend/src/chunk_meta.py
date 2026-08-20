@@ -3,7 +3,10 @@
 """
 청크 메타데이터 — 검색이 읽는 쪽
 
-    data/build_chunk_meta.py  ->  data/chunks/chunk_meta.npz  ->  여기
+    data/build_chunk_meta.py  ->  data/meta/{메타키}.npz  ->  여기
+
+메타데이터는 **문서마다 한 벌씩**이다. 파이프라인은 meta_for(문서) 로 받고,
+load_chunk_meta() 를 직접 부르면 jabber 것이 온다 (옛 호출부·단독 실행용).
 
 하는 일은 하나다. "누가 / 언제" 를 받아 **행 마스크 (N,) bool** 로 바꾼다.
 그 마스크를 filter_metadata.py 가 모아 search.py 에 넘긴다.
@@ -60,7 +63,12 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from corpus import CHUNK_META_PATH, NICKS_PATH  # noqa: E402
+from corpus import (  # noqa: E402
+    CHUNK_META_PATH,
+    NICKS_PATH,
+    Document,
+    find,
+)
 
 # build_chunk_meta.py 가 dyad 를 적을 때 쓴 구분자. 화면 표시에만 쓴다.
 DYAD_SEP = " | "
@@ -123,6 +131,13 @@ class ChunkMeta:
     n_messages: np.ndarray
     nicks: list[str]
     info: dict = field(default_factory=dict)
+
+    # 이 문서에 시각이 있는가. ko_voice 처럼 원문에 시각이 없는 문서는 ts 가
+    # 통째로 NO_TS 라 기간으로 물어볼 것이 없다 (build_chunk_meta.py 참고).
+    has_time: bool = True
+
+    # 어느 메타데이터 파일에서 왔는지. 오류 문구와 검수에만 쓴다.
+    meta_key: str = ""
 
     # 쌍 목록 (M,). dyad_row[k] 번 청크가 (dyad_a[k], dyad_b[k]) 를 갖는다.
     dyad_row: np.ndarray = field(default_factory=lambda: np.empty(0, np.int32),
@@ -224,11 +239,23 @@ class ChunkMeta:
         [since, until] 과 겹치는 세션. 한쪽만 줘도 된다.
 
         until 에 날짜만 주면 그날 끝(23:59:59.999999)까지로 본다.
+
+        **조건을 안 걸었는지 먼저 본다.** 시각이 없는 문서라고 해서 무조건
+        0건을 돌려주면, 날짜를 묻지도 않은 질문에서 "쌍 + 기간" 이 통째로
+        비어 사다리가 매번 한 겹씩 풀린다 (실제로 좁혀지기는 하지만 화면에는
+        "조건이 너무 좁아 풀었다" 고 뜬다).
+
+        조건이 있는데 시각이 없는 문서면 그때는 0건이다. 조건을 무시하고 전부
+        통과시키면 "2020-09-29 대화" 라는 질문에 시각을 모르는 청크가 섞여
+        들어온다. 모르는 것은 걸리지 않는 편이 낫다 — 문서를 통째로 후보에서
+        뺄지는 filter_metadata.py 가 한 단계 위에서 정한다.
         """
         lo = to_epoch(since)
         hi = to_epoch(until, end_of_day=True)
         if lo is None and hi is None:
-            return None
+            return None                     # 기간 조건 자체가 없다
+        if not self.has_time:
+            return self.none()              # 물었는데 답할 수가 없다
         m = self.all()
         if lo is not None:
             m &= self.ts_end >= lo
@@ -247,9 +274,10 @@ class ChunkMeta:
         """행 하나를 한 줄로. 검수와 CLI 출력에 쓴다."""
         pairs = self.dyads(row)
         who = pairs[0] if len(pairs) == 1 else f"공지 {len(pairs)}명"
-        return (f"#{self.chunk_index[row]:<6} {who:<28} "
+        when = ("시각 없음" if not self.has_time else
                 f"{from_epoch(self.ts_start[row])} ~ "
-                f"{from_epoch(self.ts_end[row])[11:]} "
+                f"{from_epoch(self.ts_end[row])[11:]}")
+        return (f"#{self.chunk_index[row]:<6} {who:<28} {when} "
                 f"({self.n_messages[row]}건)")
 
     def counts(self, nick: str) -> dict:
@@ -263,13 +291,18 @@ class ChunkMeta:
 # 로드
 # --------------------------------------------------------------------------
 
-@lru_cache(maxsize=1)
+@lru_cache(maxsize=8)
 def load_chunk_meta(path: str | None = None) -> ChunkMeta:
     """
-    chunk_meta.npz 를 읽는다. 프로세스당 한 번.
+    data/meta/{메타키}.npz 를 읽는다. 파일 하나당 프로세스당 한 번.
 
-    0.9MB 라 메모리는 문제가 되지 않는다. 역색인까지 만들어 두면 마스크 하나는
-    불리언 배열 채우기 한 번(15,522칸)이라 사실상 공짜다.
+    경로를 주지 않으면 jabber 것을 읽는다 (옛 호출부와 단독 실행용). 파이프라인
+    은 meta_for(문서) 를 거치므로 문서마다 다른 파일이 온다.
+
+    캐시를 파일 경로로 잡는다. 문서가 여럿이면 메타데이터도 여럿이고, 한 벌만
+    들고 있으면 문서를 옮겨 다닐 때마다 .npz 를 다시 읽고 역색인을 다시 짓는다.
+    jabber 가 0.9MB, ko_voice 가 4KB 라 몇 벌을 들고 있어도 메모리는 문제가
+    되지 않는다.
     """
     target = Path(path) if path else CHUNK_META_PATH
     if not target.is_file():
@@ -278,6 +311,7 @@ def load_chunk_meta(path: str | None = None) -> ChunkMeta:
             f"    python data/build_chunk_meta.py 를 먼저 돌리세요.")
 
     z = np.load(target, allow_pickle=False)
+    info = json.loads(str(z["info"]))
     nicks = [str(n) for n in z["nicks"]]
     n_rows = int(z["chunk_index"].shape[0])
 
@@ -293,7 +327,11 @@ def load_chunk_meta(path: str | None = None) -> ChunkMeta:
         ts_end=z["ts_end"],
         n_messages=z["n_messages"],
         nicks=nicks,
-        info=json.loads(str(z["info"])),
+        info=info,
+        # 옛 판본 .npz 에는 has_time 이 없다. 그때는 문서가 jabber 하나뿐이고
+        # 시각이 반드시 있었으므로 True 가 맞는 기본값이다.
+        has_time=bool(info.get("has_time", True)),
+        meta_key=str(info.get("meta_key", "")),
         dyad_row=dyad_row,
         dyad_a=dyad_a,
         dyad_b=dyad_b,
@@ -326,12 +364,54 @@ def load_chunk_meta(path: str | None = None) -> ChunkMeta:
     return meta
 
 
-@lru_cache(maxsize=1)
-def load_nicks() -> dict:
-    """닉네임 명부. 2단계 추출기가 화이트리스트로 쓴다."""
-    if not NICKS_PATH.is_file():
-        return {"n_nicks": 0, "nicks": [], "by_lower": {}, "counts": {}}
-    return json.loads(NICKS_PATH.read_text(encoding="utf-8"))
+EMPTY_NICKS = {"n_nicks": 0, "nicks": [], "by_lower": {}, "counts": {}}
+
+
+@lru_cache(maxsize=8)
+def load_nicks(path: str | None = None) -> dict:
+    """
+    닉네임 명부. 2단계 추출기가 화이트리스트로 쓴다.
+
+    명부가 없는 문서도 있다 (ko_voice). 그런 문서는 빈 명부를 돌려준다 —
+    파일이 없다고 예외를 던지면, 명부가 필요 없는 문서 하나 때문에 파이프라인이
+    통째로 멈춘다.
+    """
+    target = Path(path) if path else NICKS_PATH
+    if not target.is_file():
+        return dict(EMPTY_NICKS)
+    return json.loads(target.read_text(encoding="utf-8"))
+
+
+# --------------------------------------------------------------------------
+# 문서 -> 메타데이터
+# --------------------------------------------------------------------------
+
+def meta_for(doc: "Document | str | None") -> ChunkMeta | None:
+    """
+    문서 하나의 메타데이터. 없는 문서면 None.
+
+    **파이프라인은 이 함수만 쓴다.** load_chunk_meta() 를 직접 부르면 문서와
+    상관없이 jabber 것이 오고, 그러면 ko_voice 5번 청크가 jabber 5번 청크의
+    대화쌍을 물려받는다 (번호로만 찾기 때문이다). 여기를 거치면 문서마다
+    자기 파일이 온다.
+
+    None 을 돌려주는 경우가 둘이다.
+        1. 메타데이터를 아예 두지 않는 문서 (meta_key 가 None)
+        2. 등록은 됐는데 .npz 를 아직 안 만든 문서
+    둘 다 "사람·기간으로는 못 좁히는 문서" 라는 뜻이라 부르는 쪽에서는 같다.
+    """
+    target = doc if isinstance(doc, Document) else find(doc)
+    if target is None or not target.has_meta:
+        return None
+    return load_chunk_meta(str(target.meta_path))
+
+
+def nicks_for(doc: "Document | str | None") -> dict:
+    """문서 하나의 명부. 없으면 빈 명부."""
+    target = doc if isinstance(doc, Document) else find(doc)
+    if target is None or not target.has_nicks:
+        return dict(EMPTY_NICKS)
+    return load_nicks(str(target.nicks_path))
 
 
 # --------------------------------------------------------------------------
@@ -364,14 +444,27 @@ def _report(name: str, mask, meta: ChunkMeta, doc: str | None) -> np.ndarray:
     return mask
 
 
-def _qa_selfcheck(meta: ChunkMeta) -> None:
+def _qa_selfcheck(meta: ChunkMeta | None = None) -> None:
     """
-    qa.json 의 화자기반·날짜기반 문항으로 메타데이터 자체를 검증한다.
+    qa.json 문항으로 **메타데이터 자체**를 검증한다.
 
-    질문에서 규칙만으로 뽑을 수 있는 것(닉 쌍, 날짜)을 뽑아 필터를 걸고, 정답
+    질문에서 규칙만으로 뽑을 수 있는 것(사람, 날짜)을 뽑아 필터를 걸고, 정답
     청크가 살아남는지 본다. 여기서 떨어지면 추출기를 아무리 고쳐도 소용없다.
+    extract_metadata.py --qa 와 다른 점은 4B 를 아예 안 쓴다는 것이다.
+
+    두 가지가 고쳐졌다.
+
+        문서별   문항마다 doc 이 다르므로 메타데이터도 그 문서 것을 읽는다.
+                 예전에는 jabber 하나로 고정이라, ko 문항을 넣으면 청크 번호가
+                 jabber 것으로 읽혀 엉뚱한 청크를 정답으로 셌다.
+        패턴     "A와 B 사이의 대화" 만 보던 정규식을 extract_metadata 의 것과
+                 같은 것으로 바꿨다. qa.json 은 "A와 B의 대화속에" 라고 적혀
+                 있어서 옛 정규식은 한 문항도 못 잡았고, 그래서 이 표가 늘
+                 0/0 이었다 (검사를 하고 있다고 착각하기 딱 좋다).
     """
-    import re
+    from corpus import find
+    from extract_metadata import NAME_ASCII, NAME_HANGUL, _dates_of, _people_res
+    from filter_metadata import parse_span
 
     qa_path = CHUNK_META_PATH.parent.parent / "qa" / "qa.json"
     if not qa_path.is_file():
@@ -379,57 +472,86 @@ def _qa_selfcheck(meta: ChunkMeta) -> None:
         return
     pairs = json.loads(qa_path.read_text(encoding="utf-8"))["qa_pairs"]
 
-    pair_re = re.compile(r"([A-Za-z0-9_.\-]+)\s*(?:와|과)\s+"
-                         r"([A-Za-z0-9_.\-]+)\s*사이의\s*대화")
-    date_re = re.compile(r"(\d{4}-\d{2}-\d{2})")
-
-    row_of = {int(c): i for i, c in enumerate(meta.chunk_index)}
-    tally = {3: [0, 0, [], []], 4: [0, 0, [], []]}
+    names = {p["q_type"]: p.get("q_type_name", f"유형 {p['q_type']}")
+             for p in pairs}
+    tally: dict[tuple, dict] = {}
+    skipped: list[str] = []
 
     for p in pairs:
-        qt = p["q_type"]
-        if qt not in tally:
+        doc_key = p.get("doc") or ""
+        target = None
+        try:
+            target = find(doc_key) if doc_key else None
+        except KeyError:
+            target = None
+        here = meta_for(target) if target is not None else meta
+        if here is None:
+            skipped.append(f"{p['id']}({doc_key or 'doc 없음'})")
             continue
-        q = p["question"]
 
-        if qt == 3:
-            m = pair_re.search(q)
-            if not m:
-                tally[qt][3].append(p["id"])
-                continue
-            mask = meta.mask_dyad(m.group(1), m.group(2))
-            label = f"{m.group(1)}~{m.group(2)}"
+        question = p["question"]
+        hangul = any(str(n) and not str(n).isascii() for n in here.nicks)
+        res = _people_res(NAME_HANGUL if hangul else NAME_ASCII)
+
+        # 사람 조건: 규칙과 같은 순서로 본다 (쌍 -> 방향 -> 한 명)
+        people: list[str] = []
+        m = res["dyad"].search(question)
+        if m:
+            people = [m.group(1), m.group(2)]
         else:
-            m = date_re.search(q)
-            if not m:
-                tally[qt][3].append(p["id"])
-                continue
-            mask = meta.mask_time(m.group(1), m.group(1))
-            label = m.group(1)
+            m = res["directed"].search(question) or res["solo"].search(question)
+            if m:
+                people = [m.group(1)]
 
+        since_list, until_list = _dates_of(question)
+        since = parse_span(min(since_list), end=False) if since_list else None
+        until = parse_span(max(until_list), end=True) if until_list else None
+
+        mask, bits = None, []
+        if people:
+            got = here.mask_people(people)
+            if got is not None:
+                mask, _ = got, bits.append("+".join(people))
+        if since or until:
+            got = here.mask_time(since, until)
+            if got is not None:
+                mask = got if mask is None else (mask & got)
+                bits.append(f"{since or '...'}~{until or '...'}")
+
+        key = (doc_key, p["q_type"])
+        row = tally.setdefault(key, {"n": 0, "ok": 0, "miss": [], "none": [],
+                                     "pool": 0, "size": here.size})
+        row["n"] += 1
         if mask is None:
-            tally[qt][3].append(f"{p['id']}({label})")
+            row["none"].append(str(p["id"]))
+            row["pool"] += here.size
             continue
 
+        row_of = {int(c): i for i, c in enumerate(here.chunk_index)}
         gold = [row_of[c] for c in p["answer_chunk_indices"] if c in row_of]
         kept = int(mask[gold].sum()) if gold else 0
-        tally[qt][0] += 1
+        row["pool"] += int(mask.sum())
         if gold and kept == len(gold):
-            tally[qt][1] += 1
+            row["ok"] += 1
         else:
-            tally[qt][2].append(f"{p['id']}({label}) {kept}/{len(gold)}")
-        # 후보를 얼마나 줄였는지도 같이 본다
-        tally[qt].append(int(mask.sum()))
+            row["miss"].append(f"{p['id']}({','.join(bits)}) {kept}/{len(gold)}")
 
-    for qt, name in ((3, "화자기반 (dyad)"), (4, "날짜기반 (기간)")):
-        n, ok, miss, unparsed, *pools = tally[qt]
-        pool = f"평균 후보 {sum(pools) / len(pools):,.0f}개" if pools else ""
-        print(f"\n  {name}: 정답 청크 온전히 통과 {ok}/{n}   {pool} "
-              f"(전체 {meta.size:,}개 중)")
-        if miss:
-            print(f"    [!] 정답이 걸러진 문항: {', '.join(miss)}")
-        if unparsed:
-            print(f"    [!] 규칙으로 못 뽑은 문항: {', '.join(map(str, unparsed))}")
+    print(f"\n  {'문서':<11}{'유형':<14}{'문항':>5}{'정답전부':>9}"
+          f"{'평균후보':>10}{'축소율':>9}{'조건없음':>9}")
+    for key in sorted(tally):
+        row = tally[key]
+        avg = row["pool"] / row["n"]
+        print(f"  {key[0][:10]:<11}{str(names.get(key[1], key[1])):<14}"
+              f"{row['n']:>5}{row['ok']:>9}{avg:>10,.0f}"
+              f"{100 * avg / row['size']:>8.1f}%{len(row['none']):>9}")
+        if row["miss"]:
+            print(f"      [!] 정답이 걸러진 문항: {', '.join(row['miss'])}")
+        if row["none"]:
+            print(f"      규칙으로 조건을 못 뽑은 문항: "
+                  f"{', '.join(row['none'])} (전체를 뒤진 것으로 셌다)")
+
+    if skipped:
+        print(f"\n  [!] 건너뛴 문항 (메타데이터 없음): {', '.join(skipped)}")
 
 
 def main() -> None:
@@ -443,15 +565,24 @@ def main() -> None:
     ap.add_argument("--who", help="사람 (여럿이면 쉼표로)")
     ap.add_argument("--since", help="시작 (2020-09-29)")
     ap.add_argument("--until", help="끝 (2020-09-29)")
-    ap.add_argument("--doc", help="본문 미리보기에 쓸 코퍼스 (ru / en)")
+    ap.add_argument("--doc", help="코퍼스 (ru / en / ko). 그 문서의 "
+                                  "메타데이터를 읽고 본문도 그것으로 보여 준다")
     ap.add_argument("--qa", action="store_true", help="qa.json 자가 검증")
     args = ap.parse_args()
 
-    meta = load_chunk_meta()
-    print(f"청크 {meta.size:,}개 · 닉 {len(meta.nicks)}명 · "
-          f"쌍 {meta.dyad_row.shape[0]:,}개 · "
-          f"{from_epoch(meta.ts_start.min())[:10]} ~ "
-          f"{from_epoch(meta.ts_end.max())[:10]}")
+    # 문서를 고르면 그 문서의 메타데이터를 읽는다. 안 고르면 jabber.
+    # 여기서 문서를 안 보면 --doc ko --who 가해자3 이 jabber 명부를 뒤지고,
+    # 보이스피싱 본문 옆에 Conti 대화쌍과 2020년 시각이 붙어 나온다.
+    meta = meta_for(args.doc) if args.doc else load_chunk_meta()
+    if meta is None:
+        sys.exit(f"{args.doc}: 메타데이터가 없습니다. "
+                 f"python data/build_chunk_meta.py --doc all 를 돌리세요.")
+
+    when = (f" · {from_epoch(meta.ts_start.min())[:10]} ~ "
+            f"{from_epoch(meta.ts_end.max())[:10]}" if meta.has_time
+            else " · 시각 없음")
+    print(f"[{meta.meta_key or 'jabber'}] 청크 {meta.size:,}개 · "
+          f"이름 {len(meta.nicks)}개 · 쌍 {meta.dyad_row.shape[0]:,}개{when}")
 
     if args.qa:
         _qa_selfcheck(meta)

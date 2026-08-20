@@ -164,6 +164,8 @@ class FilterResult:
     query: MetaQuery
     n_total: int = 0
     n_kept: int = 0
+    excluded: list[str] = field(default_factory=list)   # 후보에서 뺀 문서
+    notes: list[str] = field(default_factory=list)      # 문서별 한 줄 설명
     step: str = ""                # 사다리의 어느 단계로 좁혔는지
     relaxed: list[str] = field(default_factory=list)   # 비어서 푼 조건
     summary: str = ""
@@ -402,6 +404,8 @@ def _filter(d: dict | None) -> FilterResult | None:
         query=_query(d.get("query")), n_total=int(d.get("n_total", 0)),
         n_kept=int(d.get("n_kept", 0)), step=d.get("step", ""),
         relaxed=list(d.get("relaxed", [])), summary=d.get("summary", ""),
+        excluded=list(d.get("excluded", [])),
+        notes=list(d.get("notes", [])),
     )
 
 
