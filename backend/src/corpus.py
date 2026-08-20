@@ -90,6 +90,10 @@ DOC_TITLES: dict[str, tuple[str, str, str, str]] = {
         "Conti ransom 영문", "en", "영어",
         "같은 대화의 영어 번역 · 청크 경계 동일",
     ),
+    "ko_voice": (
+        "보이스피싱 통화록", "ko", "한국어",
+        "통화 70건 · 통화 1건 = 청크 1개 (긴 통화만 발화 경계 분할)",
+    ),
 }
 
 
