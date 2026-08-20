@@ -409,14 +409,16 @@ def main() -> None:
 
         # 번호는 id 문자열의 마지막 숫자다 (_question_id). 문서가 여럿이면
         # 'jabber-001' 과 'ko-001' 이 똑같이 1번이 되어 --run 1 이 어느 쪽을
-        # 고르는지 알 수 없다. qa.json 에서 번호대를 나눠 적어야 한다.
+        # 고르는지 알 수 없다. 문서가 바뀌어도 번호는 이어서 매겨야 한다.
         seen: dict[int, list[str]] = {}
-        for row, q in zip(load_questions(), items):
-            seen.setdefault(q.id, []).append(q.question[:28])
+        for q in items:
+            seen.setdefault(q.id, []).append(f"{q.doc}:{q.question[:24]}")
         dupes = {k: v for k, v in seen.items() if len(v) > 1}
-        if dupes:
-            print(f"[!] 번호가 겹치는 문항 {sorted(dupes)} — qa.json 의 id 에서 "
-                  f"문서마다 번호대를 나누세요 (jabber 1~99, ko 101~)")
+        for number, hits in sorted(dupes.items()):
+            print(f"[!] {number}번이 {len(hits)}개 겹칩니다 — qa.json 의 id 를 "
+                  f"이어지는 번호로 고치세요")
+            for hit in hits:
+                print(f"      {hit}")
 
         unknown = []
         for q in items:

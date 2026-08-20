@@ -173,7 +173,7 @@ DOC_SPECS: dict[str, DocSpec] = {
         meta_key="jabber",
     ),
     "jabber_en": DocSpec(
-        "en_Contiransom ", "en", "영어",
+        "en_Contiransom", "en", "영어",
         "같은 대화의 영어 번역 · 청크 경계 동일",
         meta_key="jabber",
     ),
