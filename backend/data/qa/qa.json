@@ -40,10 +40,7 @@
       "q_type": 1,
       "q_type_name": "날짜 + 키워드",
       "question": "2020-08-20 부터 2020-08-22 사이에 rdpscanDll에 대한 증거를 찾아주세요.",
-      "answer_chunk_indices": [
-        93,
-        94
-      ]
+      "answer_chunk_indices": [93, 94]
     },
     {
       "id": "jabber-002",
@@ -51,9 +48,7 @@
       "q_type": 1,
       "q_type_name": "날짜 + 키워드",
       "question": "2020-07 부터 2020-08 사이에 HydraCrypt에 대한 증거를 찾아주세요.",
-      "answer_chunk_indices": [
-        1439
-      ]
+      "answer_chunk_indices": [1439]
     },
     {
       "id": "jabber-003",
@@ -61,10 +56,7 @@
       "q_type": 1,
       "q_type_name": "날짜 + 키워드",
       "question": "2020-05 부터 2020-12 사이에 NetWalker에 대한 증거를 찾아주세요.",
-      "answer_chunk_indices": [
-        13043,
-        13044
-      ]
+      "answer_chunk_indices": [13043, 13044]
     },
     {
       "id": "jabber-004",
@@ -72,9 +64,7 @@
       "q_type": 1,
       "q_type_name": "날짜 + 키워드",
       "question": "2020-06 이후에 있는 stealer에 대한 증거를 찾아주세요.",
-      "answer_chunk_indices": [
-        3269
-      ]
+      "answer_chunk_indices": [3269]
     },
     {
       "id": "jabber-005",
@@ -82,13 +72,7 @@
       "q_type": 1,
       "q_type_name": "날짜 + 키워드",
       "question": "2020-10 이전에 Wermgr에 대한 증거를 찾아주세요.",
-      "answer_chunk_indices": [
-        1720,
-        1721,
-        1722,
-        2893,
-        2894
-      ]
+      "answer_chunk_indices": [1720, 1721, 1722, 2893, 2894]
     },
     {
       "id": "jabber-006",
@@ -96,9 +80,7 @@
       "q_type": 2,
       "q_type_name": "화자 + 키워드",
       "question": "ali가 말한 module에 대한 500 bots에 대한 증거를 찾아주세요.",
-      "answer_chunk_indices": [
-        100
-      ]
+      "answer_chunk_indices": [100]
     },
     {
       "id": "jabber-007",
@@ -106,9 +88,7 @@
       "q_type": 2,
       "q_type_name": "화자 + 키워드",
       "question": "bentley가 말한 Tor ransom에 대한 증거를 찾아주세요.",
-      "answer_chunk_indices": [
-        1465
-      ]
+      "answer_chunk_indices": [1465]
     },
     {
       "id": "jabber-008",
@@ -116,9 +96,7 @@
       "q_type": 2,
       "q_type_name": "화자 + 키워드",
       "question": "professor가 말한 ransom SaaS에 대한 증거를 찾아주세요.",
-      "answer_chunk_indices": [
-        13043
-      ]
+      "answer_chunk_indices": [13043]
     },
     {
       "id": "jabber-009",
@@ -126,9 +104,7 @@
       "q_type": 2,
       "q_type_name": "화자 + 키워드",
       "question": "ponetre가 말한 SMTP spam에 대한 증거를 찾아주세요.",
-      "answer_chunk_indices": [
-        3269
-      ]
+      "answer_chunk_indices": [3269]
     },
     {
       "id": "jabber-010",
@@ -136,9 +112,7 @@
       "q_type": 2,
       "q_type_name": "화자 + 키워드",
       "question": "axel이 말한 virus VPS에 대한 증거를 찾아주세요.",
-      "answer_chunk_indices": [
-        286
-      ]
+      "answer_chunk_indices": [286]
     },
     {
       "id": "jabber-011",
@@ -146,11 +120,7 @@
       "q_type": 3,
       "q_type_name": "대화쌍 + 키워드",
       "question": "ali와 defender의 대화속에 있는 rdpscanDll에 대한 증거를 찾아주세요.",
-      "answer_chunk_indices": [
-        93,
-        94,
-        100
-      ]
+      "answer_chunk_indices": [93, 94, 100]
     },
     {
       "id": "jabber-012",
@@ -158,10 +128,7 @@
       "q_type": 3,
       "q_type_name": "대화쌍 + 키워드",
       "question": "bentley와 deploy의 대화속에 있는 ransom에 대한 증거를 찾아주세요.",
-      "answer_chunk_indices": [
-        1439,
-        1465
-      ]
+      "answer_chunk_indices": [1439, 1465]
     },
     {
       "id": "jabber-013",
@@ -169,10 +136,7 @@
       "q_type": 3,
       "q_type_name": "대화쌍 + 키워드",
       "question": "professor와 reshaev의 대화속에 있는 NetWalker에 대한 증거를 찾아주세요.",
-      "answer_chunk_indices": [
-        13043,
-        13044
-      ]
+      "answer_chunk_indices": [13043, 13044]
     },
     {
       "id": "jabber-014",
@@ -180,9 +144,7 @@
       "q_type": 3,
       "q_type_name": "대화쌍 + 키워드",
       "question": "axel과 fox의 대화속에 있는 virus에 대한 증거를 찾아주세요.",
-      "answer_chunk_indices": [
-        286
-      ]
+      "answer_chunk_indices": [286]
     },
     {
       "id": "jabber-015",
@@ -190,12 +152,7 @@
       "q_type": 3,
       "q_type_name": "대화쌍 + 키워드",
       "question": "stern과 bentley의 대화속에 있는 Bitcoin에 대한 증거를 찾아주세요.",
-      "answer_chunk_indices": [
-        3333,
-        3366,
-        3397,
-        3431
-      ]
+      "answer_chunk_indices": [3333, 3366, 3397, 3431]
     },
     {
       "id": "ko-16",
@@ -203,9 +160,7 @@
       "q_type": 2,
       "q_type_name": "화자 + 키워드",
       "question": "가해자22가 말한 대포통장에 대한 증거를 찾아주세요.",
-      "answer_chunk_indices": [
-        21
-      ]
+      "answer_chunk_indices": [21]
     },
     {
       "id": "ko-17",
@@ -213,9 +168,7 @@
       "q_type": 2,
       "q_type_name": "화자 + 키워드",
       "question": "가해자48이 말한 서울중앙지검에 대한 증거를 찾아주세요.",
-      "answer_chunk_indices": [
-        47
-      ]
+      "answer_chunk_indices": [47]
     },
     {
       "id": "ko-18",
@@ -223,9 +176,7 @@
       "q_type": 2,
       "q_type_name": "화자 + 키워드",
       "question": "가해자53이 말한 금융감독원에 대한 증거를 찾아주세요.",
-      "answer_chunk_indices": [
-        52
-      ]
+      "answer_chunk_indices": [52]
     },
     {
       "id": "ko-19",
@@ -233,9 +184,7 @@
       "q_type": 2,
       "q_type_name": "화자 + 키워드",
       "question": "가해자35가 말한 마이너스통장에 대한 증거를 찾아주세요.",
-      "answer_chunk_indices": [
-        34
-      ]
+      "answer_chunk_indices": [34]
     },
     {
       "id": "ko-20",
@@ -243,10 +192,7 @@
       "q_type": 2,
       "q_type_name": "화자 + 키워드",
       "question": "가해자27이 말한 납부증명서에 대한 증거를 찾아주세요.",
-      "answer_chunk_indices": [
-        26
-      ]
+      "answer_chunk_indices": [26]
     }
-  ],
-  "note": "doc 은 정답 청크가 든 문서 키다. 청크 번호는 문서 안에서만 유일해서 (ko_voice 에도 93번이 있고 jabber 에도 93번이 있다) doc 이 없으면 다른 문서의 같은 번호가 정답으로 잡힌다. grade.py 가 doc 으로 묶음을 가려 채점한다. jabber_ru 와 jabber_en 은 청크 번호가 같아 정답을 공유하므로 어느 쪽을 적어도 채점 결과는 같다 (--doc gold 로 좁힐 때만 실제 검색 언어가 달라진다). id 는 마지막 숫자만 뽑아 번호로 쓴다(grade.py). 문서가 달라도 번호는 겹치면 안 된다 — 겹치면 --run N 이 엉뚱한 문항을 고른다. 그래서 문서가 바뀌어도 번호는 끊지 않고 이어서 매긴다 (jabber 1~15, ko_voice 16~20). ko_voice 문항의 정답 청크는 통화 번호 - 1 이다 (통화 1건 = 청크 1개). 키워드는 전부 본문에 실제로 나오는 말로 골랐다."
+  ]
 }

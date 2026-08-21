@@ -1229,7 +1229,8 @@ with tab_data:
     c[1].metric("계정", "295")
     c[2].metric("대화 창", "1,113")
 
-    st.markdown("### preview")
+    st.markdown('<h3 style="padding:0 0 5px">preview</h3>',
+                unsafe_allow_html=True)
     frame([
         ["42498", "00:08:51", "target → barmen",
          "give decryption"],
@@ -1246,7 +1247,7 @@ with tab_data:
     st.markdown("### 데이터셋 -2")
     
     st.markdown(
-        f"**`ko보이스피싱.txt`**\n\n"
+        f"**`ko보이스피싱.txt`**- 금융감독원이 공개한 실제 보이스피싱 녹취/녹음 자료\n\n"
         f"출처: {KO_SOURCE_URL}")
 
     c = st.columns(3)
@@ -1254,7 +1255,14 @@ with tab_data:
     c[1].metric("발화", "1,379")
     c[2].metric("화자 라벨", "138")
 
-    st.markdown("### preview")
+    # 이 제목 하나만 여백을 줄인다. Streamlit 기본 heading padding 을 쓰면
+    # 위 metric 과 아래 표 사이가 지나치게 벌어진다.
+    #
+    # 인라인 style 로 거는 이유: emotion 이 만드는 클래스 이름(.st-emotion-cache-
+    # 1a2b3c)은 판올림마다 바뀌어서 선택자로 못 잡고, 그렇다고 h3 전체를 잡으면
+    # 다른 탭 제목까지 같이 줄어든다. 인라인은 특이도가 클래스 규칙보다 높다.
+    st.markdown('<h3 style="padding:0 0 5px">preview</h3>',
+                unsafe_allow_html=True)
     frame([
         ["3", "1번 대화", "가해자1",
          "예 고객님 담당자 김성도 대리입니다."],
